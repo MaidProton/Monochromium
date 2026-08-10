@@ -7,7 +7,7 @@
 // RELEASES and the .nupkg files, with {version} omitted if the host does not
 // use versioned feed URLs.
 export const updateConfig = Object.freeze({
-  feedUrl: "",
+  feedUrl: "https://update.electronjs.org/MaidProton/Monochromium/win32-x64/{version}",
   remoteReleasesUrl: "",
 });
 
