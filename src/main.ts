@@ -26,7 +26,6 @@ import {
   deleteCustomMode,
   loadCustomModes,
   sanitizeCustomModes,
-  saveCustomModes,
   upsertCustomMode,
   type CustomModeDraft,
 } from "./game/customModes.ts";
@@ -142,7 +141,12 @@ app.innerHTML = `
       <div class="menu-screen enemy-selection" id="enemy-selection" hidden>
         <div class="mode-browser-heading">
           <div><div class="onboarding-kicker">HOSTILE DATABASE</div><h2>ENEMY LIST</h2></div>
-          <button class="primary-button" data-action="new-enemy">CREATE ENEMY <span>+</span></button>
+          <div class="creator-actions">
+            <input id="enemy-import-input" type="file" accept="application/json,.json" hidden>
+            <button class="secondary-button" data-action="import-enemies">IMPORT ENEMIES</button>
+            <button class="secondary-button" data-action="export-selected-enemies" id="export-selected-enemies">EXPORT SELECTED <span id="selected-enemy-count">0</span></button>
+            <button class="primary-button" data-action="new-enemy">CREATE ENEMY <span>+</span></button>
+          </div>
         </div>
         <div class="enemy-library">
           <section>
@@ -203,7 +207,11 @@ app.innerHTML = `
       <div class="menu-screen mode-selection" id="mode-selection" hidden>
         <div class="mode-browser-heading">
           <div><div class="onboarding-kicker">FINITE TIMELINES</div><h2>MODE LIST</h2></div>
-          <button class="primary-button" data-action="new-mode">CREATE MODE <span>+</span></button>
+          <div class="creator-actions">
+            <input id="mode-import-input" type="file" accept="application/json,.json" hidden>
+            <button class="secondary-button" data-action="import-mode">IMPORT MODE</button>
+            <button class="primary-button" data-action="new-mode">CREATE MODE <span>+</span></button>
+          </div>
         </div>
         <div class="mode-library">
           <section>
@@ -427,6 +435,7 @@ let activeMode: ModeDefinition = NORMAL_MODE;
 let creatorDraft: CustomModeDraft | null = null;
 let creatorWaveIndex = 0;
 let enemyDraft: CustomEnemyDraft | null = null;
+const selectedEnemyIds = new Set<string>();
 let runSettled = false;
 const BATTLE_LOG_HIDDEN_KEY = "monochromium:battle-log-hidden";
 try {
@@ -450,6 +459,71 @@ const setSaveStatus = (message: string, tone: "good" | "danger" | "neutral" = "n
   const status = query<HTMLElement>("#save-status");
   status.textContent = message;
   status.className = `save-notice ${tone}`;
+};
+
+type EnemyReferenceMode = {
+  readonly waves: readonly { readonly blocks?: readonly { readonly enemy: string }[] }[];
+};
+
+const getRequiredCustomEnemyIds = (mode: EnemyReferenceMode): string[] => {
+  const required = new Set<string>();
+  const visit = (kind: string): void => {
+    if (!kind.startsWith("custom-enemy:") || required.has(kind)) return;
+    required.add(kind);
+    const enemy = customEnemies.find((candidate) => candidate.id === kind);
+    enemy?.summonKinds.forEach((summonKind) => visit(summonKind));
+  };
+  mode.waves.forEach((wave) => wave.blocks?.forEach((block) => visit(block.enemy)));
+  return [...required];
+};
+
+const getMissingCustomEnemyIds = (mode: EnemyReferenceMode): string[] => {
+  const available = new Set<string>(customEnemies.map((enemy) => enemy.id));
+  return getRequiredCustomEnemyIds(mode).filter((id) => !available.has(id));
+};
+
+const formatMissingCustomEnemies = (ids: readonly string[]): string => ids.map((id) => {
+  const known = customEnemies.find((enemy) => enemy.id === id);
+  return known?.name ?? id.replace("custom-enemy:", "CUSTOM ");
+}).join(", ");
+
+const safeFilename = (value: string): string => value
+  .replace(/[^a-z0-9]+/gi, "-")
+  .replace(/^-|-$/g, "")
+  .toLowerCase()
+  .slice(0, 60) || "monochromium-export";
+
+const downloadJson = (filename: string, value: unknown): void => {
+  const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const updateSelectedEnemyCount = (): void => {
+  query<HTMLElement>("#selected-enemy-count").textContent = selectedEnemyIds.size.toString();
+  query<HTMLButtonElement>("#export-selected-enemies").disabled = selectedEnemyIds.size === 0;
+};
+
+const exportEnemyBundle = (enemies: readonly CustomEnemyDraft[], filename: string): void => {
+  downloadJson(filename, {
+    type: "monochromium-custom-enemies",
+    version: 1,
+    enemies,
+  });
+  setSaveStatus(`${enemies.length} ${enemies.length === 1 ? "enemy" : "enemies"} exported.`, "good");
+};
+
+const exportModeFile = (mode: CustomModeDraft): void => {
+  downloadJson(`monochromium-mode-${safeFilename(mode.name)}.json`, {
+    type: "monochromium-custom-mode",
+    version: 1,
+    mode,
+  });
+  setSaveStatus(`Mode "${mode.name}" exported.`, "good");
 };
 
 const renderUpdateState = (state: MonochromiumUpdateState): void => {
@@ -544,12 +618,14 @@ const renderEnemyList = (): void => {
   const list = query<HTMLElement>("#custom-enemy-list");
   if (customEnemies.length === 0) {
     list.innerHTML = `<div class="empty-mode-list"><strong>NO CREATED ENEMIES</strong><span>Create a polygon hostile for custom modes.</span></div>`;
+    updateSelectedEnemyCount();
     return;
   }
   list.innerHTML = customEnemies.map((enemy) => {
     const specials = [enemy.hidden ? "HIDDEN" : "", enemy.summoningEnabled ? "SUMMONER" : "", enemy.stunningEnabled ? "STUN" : "", enemy.boss ? "BOSS" : ""].filter(Boolean).join(" // ");
-    return `<article class="enemy-library-card">${enemyShapeCard(enemy.name, enemy.color, enemy.sides)}<div><small>CREATED // ${enemy.sides} SIDES</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemy.hp.toLocaleString()} HP · ${enemy.speed} SPEED · ${enemy.damage} DMG</p>${specials ? `<b>${specials}</b>` : ""}</div><div class="enemy-card-actions"><button data-action="edit-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EDIT</button><button class="danger" data-action="delete-enemy" data-enemy-id="${escapeHtml(enemy.id)}">DELETE</button></div></article>`;
+    return `<article class="enemy-library-card">${enemyShapeCard(enemy.name, enemy.color, enemy.sides)}<div><small>CREATED // ${enemy.sides} SIDES</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemy.hp.toLocaleString()} HP · ${enemy.speed} SPEED · ${enemy.damage} DMG</p>${specials ? `<b>${specials}</b>` : ""}</div><div class="enemy-card-actions"><label class="enemy-select"><input type="checkbox" data-enemy-select="${escapeHtml(enemy.id)}" ${selectedEnemyIds.has(enemy.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EXPORT</button><button data-action="edit-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EDIT</button><button class="danger" data-action="delete-enemy" data-enemy-id="${escapeHtml(enemy.id)}">DELETE</button></div></article>`;
   }).join("");
+  updateSelectedEnemyCount();
 };
 
 const renderEnemyCreator = (): void => {
@@ -595,20 +671,27 @@ const renderModeList = (): void => {
     list.innerHTML = `<div class="empty-mode-list"><strong>NO CREATED MODES</strong><span>Open the creator to build a local finite timeline.</span></div>`;
     return;
   }
-  list.innerHTML = customModes.map((mode) => `
-    <article class="mode-entry">
+  list.innerHTML = customModes.map((mode) => {
+    const missingEnemies = getMissingCustomEnemyIds(mode);
+    const dependencyNotice = missingEnemies.length > 0
+      ? `<b class="missing-dependency">LOCKED // IMPORT: ${escapeHtml(formatMissingCustomEnemies(missingEnemies))}</b>`
+      : "";
+    return `
+    <article class="mode-entry${missingEnemies.length > 0 ? " missing-dependency-entry" : ""}">
       <div>
         <small>CREATED // ${mode.waves.length} ${mode.waves.length === 1 ? "WAVE" : "WAVES"} // NO REWARDS</small>
         <strong>${escapeHtml(mode.name)}</strong>
-        <p>${escapeHtml(mode.description)}</p>
+        <p>${escapeHtml(mode.description)}</p>${dependencyNotice}
       </div>
       <div class="mode-entry-actions">
-        <button class="primary-button" data-action="select-mode" data-mode-id="${escapeHtml(mode.id)}">SELECT</button>
+        <button class="primary-button" data-action="select-mode" data-mode-id="${escapeHtml(mode.id)}" ${missingEnemies.length > 0 ? "disabled" : ""}>${missingEnemies.length > 0 ? "LOCKED" : "SELECT"}</button>
+        <button class="secondary-button" data-action="export-mode" data-mode-id="${escapeHtml(mode.id)}">EXPORT</button>
         <button class="secondary-button" data-action="edit-mode" data-mode-id="${escapeHtml(mode.id)}">EDIT</button>
         <button class="entry-delete" data-action="delete-mode" data-mode-id="${escapeHtml(mode.id)}">DELETE</button>
       </div>
     </article>
-  `).join("");
+  `;
+  }).join("");
 };
 
 const updateSelectedModeCopy = (): void => {
@@ -1081,6 +1164,54 @@ const hydrateDiskPersistence = async (): Promise<void> => {
 void hydrateDiskPersistence();
 void hydrateUpdater();
 
+const importEnemiesFromFile = async (file: File): Promise<void> => {
+  try {
+    const parsed = JSON.parse(await file.text()) as { type?: unknown; enemies?: unknown };
+    if (parsed?.type !== "monochromium-custom-enemies" || !Array.isArray(parsed.enemies)) {
+      throw new Error("This is not a Monochromium enemy export.");
+    }
+    const imported = sanitizeCustomEnemies(parsed.enemies);
+    if (imported.length === 0) throw new Error("The export did not contain any valid enemies.");
+    const conflicts = imported.filter((enemy) => customEnemies.some((current) => current.id === enemy.id));
+    if (conflicts.length > 0 && !window.confirm(`Replace ${conflicts.length} existing custom ${conflicts.length === 1 ? "enemy" : "enemies"}?`)) return;
+    customEnemies = [...customEnemies.filter((current) => !imported.some((enemy) => enemy.id === current.id)), ...imported];
+    setCustomEnemyRegistry(customEnemies);
+    saveCustomEnemies(customEnemies);
+    renderEnemyList();
+    renderModeList();
+    addLog(`${imported.length} custom ${imported.length === 1 ? "enemy" : "enemies"} imported.`, "good");
+    setSaveStatus(`${imported.length} ${imported.length === 1 ? "enemy" : "enemies"} imported.`, "good");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid enemy export.";
+    addLog(`Enemy import failed // ${message}`, "danger");
+    setSaveStatus(`Enemy import failed // ${message}`, "danger");
+  }
+};
+
+const importModeFromFile = async (file: File): Promise<void> => {
+  try {
+    const parsed = JSON.parse(await file.text()) as { type?: unknown; mode?: unknown };
+    if (parsed?.type !== "monochromium-custom-mode" || !parsed.mode) {
+      throw new Error("This is not a Monochromium mode export.");
+    }
+    const imported = sanitizeCustomModes([parsed.mode])[0];
+    if (!imported) throw new Error("The export did not contain a valid mode.");
+    if (customModes.some((mode) => mode.id === imported.id) && !window.confirm(`Replace the existing mode "${imported.name}"?`)) return;
+    customModes = upsertCustomMode(customModes, imported);
+    renderModeList();
+    const missingEnemies = getMissingCustomEnemyIds(imported);
+    const suffix = missingEnemies.length > 0
+      ? ` Locked // import: ${formatMissingCustomEnemies(missingEnemies)}.`
+      : "";
+    addLog(`Mode "${imported.name}" imported.${suffix}`, missingEnemies.length > 0 ? "danger" : "good");
+    setSaveStatus(`Mode "${imported.name}" imported.${suffix}`, missingEnemies.length > 0 ? "danger" : "good");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid mode export.";
+    addLog(`Mode import failed // ${message}`, "danger");
+    setSaveStatus(`Mode import failed // ${message}`, "danger");
+  }
+};
+
 const runAction = (action: string, value?: string, source?: HTMLElement): void => {
   switch (action) {
     case "open-modes":
@@ -1096,6 +1227,19 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       enemyDraft = createCustomEnemy();
       showFrontScreen("enemy-creator");
       break;
+    case "import-enemies":
+      query<HTMLInputElement>("#enemy-import-input").click();
+      break;
+    case "export-selected-enemies": {
+      const selected = customEnemies.filter((enemy) => selectedEnemyIds.has(enemy.id));
+      if (selected.length > 0) exportEnemyBundle(selected, `monochromium-enemies-${selected.length}.json`);
+      break;
+    }
+    case "export-enemy": {
+      const enemy = customEnemies.find((candidate) => candidate.id === source?.dataset["enemyId"]);
+      if (enemy) exportEnemyBundle([enemy], `monochromium-enemy-${safeFilename(enemy.name)}.json`);
+      break;
+    }
     case "edit-enemy": {
       const enemy = customEnemies.find((candidate) => candidate.id === source?.dataset["enemyId"]);
       if (!enemy) break;
@@ -1106,21 +1250,13 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "delete-enemy": {
       const enemy = customEnemies.find((candidate) => candidate.id === source?.dataset["enemyId"]);
       if (!enemy || !window.confirm(`Delete "${enemy.name}"? Custom wave references will be changed to Dummy.`)) break;
-      customEnemies = customEnemies.filter((candidate) => candidate.id !== enemy.id).map((candidate) => ({
-        ...candidate,
-        summonKinds: candidate.summonKinds.filter((kind) => kind !== enemy.id),
-      }));
-      customEnemies.forEach((candidate) => {
-        if (candidate.summonKinds.length === 0) candidate.summonKinds = ["dummy"];
-      });
+      customEnemies = customEnemies.filter((candidate) => candidate.id !== enemy.id);
+      selectedEnemyIds.delete(enemy.id);
       setCustomEnemyRegistry(customEnemies);
       saveCustomEnemies(customEnemies);
-      customModes.forEach((mode) => mode.waves.forEach((wave) => wave.blocks.forEach((block) => {
-        if (block.enemy === enemy.id) block.enemy = "dummy";
-      })));
-      saveCustomModes(customModes);
       renderEnemyList();
-      addLog(`${enemy.name} deleted // custom wave references changed to Dummy.`, "danger");
+      renderModeList();
+      addLog(`${enemy.name} deleted // dependent modes remain locked until it is imported again.`, "danger");
       break;
     }
     case "enemy-back":
@@ -1141,6 +1277,9 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "import-save":
       query<HTMLInputElement>("#save-import-input").click();
       break;
+    case "import-mode":
+      query<HTMLInputElement>("#mode-import-input").click();
+      break;
     case "check-update":
       void checkForUpdate();
       break;
@@ -1160,6 +1299,11 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       else {
         const custom = customModes.find((mode) => mode.id === modeId);
         if (!custom) break;
+        const missingEnemies = getMissingCustomEnemyIds(custom);
+        if (missingEnemies.length > 0) {
+          window.alert(`This mode is locked. Import these custom enemies first: ${formatMissingCustomEnemies(missingEnemies)}.`);
+          break;
+        }
         selectedMode = customModeToDefinition(custom);
       }
       showFrontScreen("maps");
@@ -1177,6 +1321,11 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       creatorDraft = cloneCustomMode(custom);
       creatorWaveIndex = 0;
       showFrontScreen("creator");
+      break;
+    }
+    case "export-mode": {
+      const mode = customModes.find((candidate) => candidate.id === source?.dataset["modeId"]);
+      if (mode) exportModeFile(mode);
       break;
     }
     case "delete-mode": {
@@ -1262,6 +1411,13 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       if (value) selectMapCard(value as MapKind);
       break;
     case "start-map":
+      {
+      const missingEnemies = getMissingCustomEnemyIds(selectedMode);
+      if (missingEnemies.length > 0) {
+        window.alert(`This mode is locked. Import these custom enemies first: ${formatMissingCustomEnemies(missingEnemies)}.`);
+        showFrontScreen("modes");
+        break;
+      }
       activeMapKind = selectedMapKind;
       runSettled = false;
       mainMenu.hidden = true;
@@ -1276,6 +1432,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       activeMode = selectedMode;
       game.startRun(activeMapKind, progress.unlockedTowers, activeMode);
       break;
+      }
     case "main-menu":
       game.leaveRun();
       showFrontScreen("main");
@@ -1454,6 +1611,13 @@ app.addEventListener("input", (event) => {
 
 app.addEventListener("change", (event) => {
   const field = event.target as HTMLInputElement | HTMLSelectElement;
+  const enemyId = field.dataset["enemySelect"];
+  if (field instanceof HTMLInputElement && enemyId) {
+    if (field.checked) selectedEnemyIds.add(enemyId);
+    else selectedEnemyIds.delete(enemyId);
+    updateSelectedEnemyCount();
+    return;
+  }
   if (creatorDraft && field.dataset["blockField"] === "nextBlockDelay") renderCreator();
 });
 
@@ -1487,6 +1651,20 @@ query<HTMLInputElement>("#save-import-input").addEventListener("change", async (
     const message = error instanceof Error ? error.message : "Invalid save file.";
     setSaveStatus(`Import failed // ${message}`, "danger");
   }
+});
+
+query<HTMLInputElement>("#enemy-import-input").addEventListener("change", async (event) => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file) await importEnemiesFromFile(file);
+});
+
+query<HTMLInputElement>("#mode-import-input").addEventListener("change", async (event) => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file) await importModeFromFile(file);
 });
 
 window.addEventListener("keydown", (event) => {

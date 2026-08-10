@@ -71,8 +71,12 @@ export const createCustomMode = (): CustomModeDraft => ({
 
 const sanitizeBlock = (value: unknown): CustomEnemyGroupBlockDraft => {
   const source = value && typeof value === "object" ? value as Partial<CustomEnemyGroupBlockDraft> : {};
-  const enemy = isKnownEnemyKind(source.enemy)
-    ? source.enemy
+  // Keep valid custom-enemy IDs even when the referenced enemy is not
+  // installed yet. This lets imported modes remain locked instead of
+  // silently changing their waves to Dummy.
+  const rawEnemy = source.enemy as unknown;
+  const enemy = (isKnownEnemyKind(rawEnemy) || (typeof rawEnemy === "string" && rawEnemy.startsWith("custom-enemy:")))
+    ? rawEnemy as EnemyKind
     : "dummy";
   return {
     command: "enemyGroup",

@@ -330,6 +330,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
 .mode-entry small { color: var(--gold); font: 600 9px "DM Mono", monospace; letter-spacing: .08em; }
 .mode-entry strong { display: block; margin-top: 9px; color: #eff2ed; font-size: 19px; }
 .mode-entry p { margin: 7px 0 0; color: #9fa8a3; font-size: 12px; line-height: 1.5; }
+.mode-entry .missing-dependency { display: block; margin-top: 9px; color: var(--danger); font: 600 9px "DM Mono", monospace; letter-spacing: .05em; line-height: 1.4; }
+.missing-dependency-entry { border-color: #70433f; }
 .mode-entry-actions { display: grid; gap: 6px; }
 .mode-entry-actions button { min-width: 96px; min-height: 38px; padding-inline: 12px; font-size: 10px; }
 .entry-delete { border: 1px solid #67403e; background: #1b1414; color: #d87d77; cursor: pointer; font: 600 9px "DM Mono", monospace; letter-spacing: .06em; }
@@ -351,6 +353,9 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
 .enemy-library-card p { margin: 5px 0 0; color: #949d98; font: 500 9px/1.4 "DM Mono", monospace; }
 .enemy-library-card b { display: block; margin-top: 7px; color: #bd88df; font: 600 8px "DM Mono", monospace; letter-spacing: .06em; }
 .enemy-card-actions { display: grid; gap: 6px; }
+.enemy-card-actions .enemy-select { min-width: 76px; min-height: 34px; padding: 0 9px; display: flex; align-items: center; gap: 7px; border: 1px solid #56605c; background: #171d1e; color: #d4dad6; cursor: pointer; font: 700 9px "DM Mono", monospace; letter-spacing: .07em; }
+.enemy-card-actions .enemy-select:has(input:checked) { border-color: var(--gold); color: var(--gold); background: rgba(241,208,122,.08); }
+.enemy-card-actions .enemy-select input { margin: 0; accent-color: var(--gold); }
 .enemy-card-actions button { min-width: 76px; min-height: 34px; padding: 0 9px; border: 1px solid #56605c; background: #171d1e; color: #d4dad6; cursor: pointer; font: 700 9px "DM Mono", monospace; letter-spacing: .07em; }
 .enemy-card-actions button:hover { border-color: var(--gold); color: var(--gold); }
 .enemy-card-actions button.danger { border-color: #67403e; color: #dc817a; }
@@ -567,7 +572,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
   .mode-entry-actions { grid-template-columns: repeat(3, 1fr); }
   .mode-entry-actions button { min-width: 0; }
   .creator-topbar { display: block; }
-  .creator-actions { margin-top: 10px; }
+  .creator-actions { margin-top: 10px; flex-wrap: wrap; }
   .creator-actions button { flex: 1; }
   .creator-settings { grid-template-columns: 1fr; }
   .enemy-editor-shell { display: flex; flex-direction: column; overflow-y: auto; }
