@@ -1,6 +1,6 @@
 import { MAP_DEFINITIONS, TOWER_DEFINITIONS, TOWER_ORDER } from "./config.ts";
 import { saveDiskSection } from "./persistence.ts";
-import type { MapKind, TowerKind } from "./types.ts";
+import type { OfficialMapKind, TowerKind } from "./types.ts";
 
 const STORAGE_KEY = "monochromium.meta.v1";
 
@@ -9,7 +9,7 @@ export interface MetaProgress {
   coins: number;
   tokens: number;
   unlockedTowers: TowerKind[];
-  clearedMaps: MapKind[];
+  clearedMaps: OfficialMapKind[];
   runs: number;
   victories: number;
 }
@@ -33,10 +33,10 @@ const uniqueKnownTowers = (value: unknown): TowerKind[] => {
   return TOWER_ORDER.filter((kind) => known.has(kind));
 };
 
-const uniqueKnownMaps = (value: unknown): MapKind[] => {
+const uniqueKnownMaps = (value: unknown): OfficialMapKind[] => {
   if (!Array.isArray(value)) return [];
-  const known = new Set(Object.keys(MAP_DEFINITIONS) as MapKind[]);
-  return [...new Set(value.filter((kind): kind is MapKind => typeof kind === "string" && known.has(kind as MapKind)))];
+  const known = new Set(Object.keys(MAP_DEFINITIONS) as OfficialMapKind[]);
+  return [...new Set(value.filter((kind): kind is OfficialMapKind => typeof kind === "string" && known.has(kind as OfficialMapKind)))];
 };
 
 const safeNumber = (value: unknown): number =>

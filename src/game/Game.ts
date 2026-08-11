@@ -12,12 +12,12 @@ import {
   WORLD_WIDTH,
 } from "./config.ts";
 import { getEnemyDefinition } from "./enemyRegistry.ts";
+import { createMapPathShape, drawMapCore, drawMapField, drawMapPath } from "./mapRendering.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import type {
   Enemy,
   EnemyKind,
   MapDefinition,
-  MapKind,
   ModeDefinition,
   Particle,
   PlacementPreview,
@@ -70,6 +70,7 @@ interface TimedBomb {
   readonly radius: number;
   readonly color: string;
   readonly ownerId?: number;
+  readonly sourceKind?: TowerKind;
   readonly proximity?: boolean;
   readonly towerLevel?: number;
   timer: number;
@@ -108,6 +109,9 @@ const mixHexColors = (start: string, end: string, amount: number): string => {
 
 export class Game {
   private readonly context: CanvasRenderingContext2D;
+  private readonly staticMapCanvas: HTMLCanvasElement;
+  private readonly vignetteCanvas: HTMLCanvasElement;
+  private mapPathShape = new Path2D();
   private map: MapDefinition = MAP_DEFINITIONS.sector07;
   private path = new Polyline(this.map.path);
   private readonly audio = new AudioSystem();
@@ -159,7 +163,10 @@ export class Game {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Canvas 2D is not supported by this browser.");
     this.context = context;
+    this.staticMapCanvas = document.createElement("canvas");
+    this.vignetteCanvas = document.createElement("canvas");
     this.callbacks = callbacks;
+    this.rebuildStaticMapLayer();
     this.bindInput();
     this.resize();
     new ResizeObserver(() => this.resize()).observe(canvas);
@@ -177,9 +184,10 @@ export class Game {
     ) as Record<TowerKind, number>;
   }
 
-  startRun(mapKind: MapKind, unlockedTowers: readonly TowerKind[], mode: ModeDefinition = NORMAL_MODE): void {
-    this.map = MAP_DEFINITIONS[mapKind];
+  startRun(map: MapDefinition, unlockedTowers: readonly TowerKind[], mode: ModeDefinition = NORMAL_MODE): void {
+    this.map = map;
     this.path = new Polyline(this.map.path);
+    this.rebuildStaticMapLayer();
     this.mode = mode;
     this.availableTowerKinds = new Set(unlockedTowers);
     this.availableTowerKinds.add("bandit");
@@ -340,7 +348,7 @@ export class Game {
   }
 
   cycleSpeed(): void {
-    this.speed = this.speed === 1 ? 2 : 1;
+    this.speed = this.speed === 1 ? 1.5 : this.speed === 1.5 ? 2 : 1;
     this.callbacks.onLog(`Simulation clock set to ${this.speed}×.`);
     this.emitUi();
   }
@@ -682,7 +690,7 @@ export class Game {
       case "infernus": {
         const range = stats.range * RANGE_SCALE;
         const victims = this.enemies.filter(
-          (enemy) => distance(tower.position, this.enemyPosition(enemy)) <= range,
+          (enemy) => this.canTowerTarget(tower, enemy) && distance(tower.position, this.enemyPosition(enemy)) <= range,
         );
         victims.forEach((enemy) => {
           this.damageEnemy(enemy, Math.max(2, damage * 3), accent);
@@ -693,11 +701,17 @@ export class Game {
         break;
       }
       case "bomber": {
-        const victims = this.enemies.filter((enemy) => enemy.targetTowerId === tower.id);
+        const victims = this.enemies.filter(
+          (enemy) => enemy.targetTowerId === tower.id && this.canTowerTarget(tower, enemy),
+        );
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
           this.enemies
-            .filter((candidate) => distance(this.enemyPosition(candidate), impact) <= 72)
+            .filter(
+              (candidate) =>
+                this.canTowerTarget(tower, candidate) &&
+                distance(this.enemyPosition(candidate), impact) <= 72,
+            )
             .forEach((candidate) => this.damageEnemy(candidate, Math.max(20, damage * 5), accent));
           this.spawnExplosion(impact, accent, 72);
         });
@@ -747,7 +761,9 @@ export class Game {
       }
       case "warrior": {
         const victims = this.enemies.filter(
-          (enemy) => distance(tower.position, this.enemyPosition(enemy)) <= stats.range * RANGE_SCALE,
+          (enemy) =>
+            this.canTowerTarget(tower, enemy) &&
+            distance(tower.position, this.enemyPosition(enemy)) <= stats.range * RANGE_SCALE,
         );
         victims.forEach((enemy) => this.damageEnemy(enemy, damage * (tower.level >= 4 ? 4 : 2), accent));
         const aim = victims[0] ? this.enemyPosition(victims[0]) : { x: tower.position.x + 1, y: tower.position.y };
@@ -843,6 +859,8 @@ export class Game {
       damage: 500 * tower.damageBuff,
       radius: 105,
       color: TOWER_DEFINITIONS.bomber.accent,
+      sourceKind: tower.kind,
+      towerLevel: tower.level,
       timer: 5,
     });
     tower.abilityCooldown = 60;
@@ -907,6 +925,8 @@ export class Game {
   }
 
   private get viewport(): { readonly x: number; readonly y: number; readonly scale: number } {
+    // Keep the complete world visible inside the dedicated battlefield.
+    // Any remaining space becomes a frame instead of cropping map lanes.
     const scale = Math.min(this.canvas.width / WORLD_WIDTH, this.canvas.height / WORLD_HEIGHT);
     return {
       x: (this.canvas.width - WORLD_WIDTH * scale) / 2,
@@ -918,8 +938,43 @@ export class Game {
   private resize(): void {
     const bounds = this.canvas.getBoundingClientRect();
     const ratio = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = Math.max(1, Math.round(bounds.width * ratio));
-    this.canvas.height = Math.max(1, Math.round(bounds.height * ratio));
+    const width = Math.max(1, Math.round(bounds.width * ratio));
+    const height = Math.max(1, Math.round(bounds.height * ratio));
+    if (this.canvas.width === width && this.canvas.height === height) return;
+    this.canvas.width = width;
+    this.canvas.height = height;
+    this.rebuildVignetteLayer();
+  }
+
+  private rebuildStaticMapLayer(): void {
+    this.staticMapCanvas.width = WORLD_WIDTH;
+    this.staticMapCanvas.height = WORLD_HEIGHT;
+    const context = this.staticMapCanvas.getContext("2d");
+    if (!context) return;
+    this.mapPathShape = createMapPathShape(this.map);
+    this.drawField(context);
+    this.drawStaticPath(context);
+  }
+
+  private rebuildVignetteLayer(): void {
+    this.vignetteCanvas.width = this.canvas.width;
+    this.vignetteCanvas.height = this.canvas.height;
+    const context = this.vignetteCanvas.getContext("2d");
+    if (!context) return;
+    const centerX = this.vignetteCanvas.width / 2;
+    const centerY = this.vignetteCanvas.height / 2;
+    const gradient = context.createRadialGradient(
+      centerX,
+      centerY,
+      Math.min(this.vignetteCanvas.width, this.vignetteCanvas.height) * 0.2,
+      centerX,
+      centerY,
+      Math.hypot(this.vignetteCanvas.width, this.vignetteCanvas.height) * 0.62,
+    );
+    gradient.addColorStop(0, "rgba(0,0,0,0)");
+    gradient.addColorStop(1, "rgba(0,0,0,.56)");
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, this.vignetteCanvas.width, this.vignetteCanvas.height);
   }
 
   private updatePlacement(): void {
@@ -936,10 +991,15 @@ export class Game {
     );
     const boundsClear = position.x > 42 && position.x < WORLD_WIDTH - 42 && position.y > 42 && position.y < WORLD_HEIGHT - 42;
     const pathClear = !onPath || (projected.distance > 135 && projected.distance < this.path.totalLength - 135);
+    const blockedClear = onPath || this.map.blockedZones.every((zone) => {
+      const closestX = clamp(position.x, zone.x, zone.x + zone.width);
+      const closestY = clamp(position.y, zone.y, zone.y + zone.height);
+      return Math.hypot(position.x - closestX, position.y - closestY) >= 34;
+    });
     this.placement = {
       position,
       onPath,
-      valid: towerClear && boundsClear && pathClear,
+      valid: towerClear && boundsClear && pathClear && blockedClear,
       pathDistance: projected.distance,
     };
   }
@@ -1078,14 +1138,18 @@ export class Game {
   private frame(timestamp: number): void {
     const rawDelta = this.lastTimestamp === 0 ? 0 : (timestamp - this.lastTimestamp) / 1000;
     this.lastTimestamp = timestamp;
+    if (!this.started) {
+      this.animationFrame = requestAnimationFrame((nextTimestamp) => this.frame(nextTimestamp));
+      return;
+    }
     const delta = Math.min(rawDelta, 0.05) * this.speed;
     this.elapsed += rawDelta;
-    if (this.started && !this.paused && !this.gameOver) this.update(delta);
+    if (!this.paused && !this.gameOver) this.update(delta);
     else this.updateParticles(Math.min(rawDelta, 0.05));
     this.draw();
     this.uiTimer -= rawDelta;
     if (this.uiTimer <= 0) {
-      this.uiTimer = 0.08;
+      this.uiTimer = 0.1;
       this.emitUi();
     }
     this.animationFrame = requestAnimationFrame((nextTimestamp) => this.frame(nextTimestamp));
@@ -1125,6 +1189,8 @@ export class Game {
       pathDistance,
       hp,
       maxHp: hp,
+      shieldHp: base.shieldHp,
+      maxShieldHp: base.shieldHp,
       speed: base.speed,
       damage: base.damage,
       attackInterval: base.attackInterval,
@@ -1424,6 +1490,7 @@ export class Game {
               radius: tower.level >= 1 ? 60 : 46,
               color: definition.accent,
               ownerId: tower.id,
+              sourceKind: tower.kind,
               proximity: true,
               towerLevel: tower.level,
               timer: Number.POSITIVE_INFINITY,
@@ -1455,9 +1522,9 @@ export class Game {
             if (!target) continue;
             this.projectiles.push({
               position: { ...tower.position },
-              delay: index * 0.09,
+              delay: index * 1,
               targetId: target.id,
-              damage: 175 * tower.damageBuff,
+              damage: 140 * tower.damageBuff,
               kind: "cyborg",
               speed: 430,
               splash: 52,
@@ -1700,6 +1767,7 @@ export class Game {
   }
 
   private resolveTempestHit(tower: Tower, target: Enemy): void {
+    if (!this.canTowerTarget(tower, target)) return;
     const stats = this.towerStats(tower);
     const accent = TOWER_DEFINITIONS.tempest.accent;
     const radius = tower.level >= 4 ? 60 : tower.level >= 2 ? 30 : 0;
@@ -1708,7 +1776,13 @@ export class Game {
     const impact = this.enemyPosition(target);
     if (radius > 0) {
       this.enemies
-        .filter((enemy) => enemy.id !== target.id && enemy.hp > 0 && distance(this.enemyPosition(enemy), impact) <= radius)
+        .filter(
+          (enemy) =>
+            enemy.id !== target.id &&
+            enemy.hp > 0 &&
+            this.canTowerTarget(tower, enemy) &&
+            distance(this.enemyPosition(enemy), impact) <= radius,
+        )
         .forEach((enemy) => this.damageEnemy(enemy, damage, accent));
     }
     if (tower.level >= 2) this.applyShockAround(tower, tower.level >= 4 ? 0.1 : 0.5, 2);
@@ -1730,7 +1804,12 @@ export class Game {
     const minFieldDamage = 28;
     const maxFieldDamage = 200;
     this.enemies
-      .filter((enemy) => enemy.hp > 0 && distance(this.enemyPosition(enemy), tower.position) <= 150)
+      .filter(
+        (enemy) =>
+          enemy.hp > 0 &&
+          this.canTowerTarget(tower, enemy) &&
+          distance(this.enemyPosition(enemy), tower.position) <= 150,
+      )
       .forEach((enemy) => {
         const totalDamage = clamp(enemy.hp * 0.08, minFieldDamage, maxFieldDamage);
         this.damageEnemy(enemy, (totalDamage / duration) * tower.damageBuff, TOWER_DEFINITIONS.tempest.accent);
@@ -1791,10 +1870,13 @@ export class Game {
   }
 
   private canTowerTarget(tower: Tower, enemy: Enemy): boolean {
+    return this.canTowerKindTarget(tower.kind, tower.level, enemy);
+  }
+
+  private canTowerKindTarget(kind: TowerKind, level: number, enemy: Enemy): boolean {
     if (!getEnemyDefinition(enemy.kind).hidden) return true;
-    if (tower.kind === "infernus") return true;
-    const detectionLevel = TOWER_DEFINITIONS[tower.kind].hiddenDetectionLevel;
-    return detectionLevel !== undefined && tower.level >= detectionLevel;
+    const detectionLevel = TOWER_DEFINITIONS[kind].hiddenDetectionLevel;
+    return detectionLevel !== undefined && level >= detectionLevel;
   }
 
   private updateProjectiles(delta: number): void {
@@ -1805,7 +1887,12 @@ export class Game {
         survivors.push(projectile);
         continue;
       }
-      const target = this.enemies.find((enemy) => enemy.id === projectile.targetId && enemy.hp > 0);
+      const target = this.enemies.find(
+        (enemy) =>
+          enemy.id === projectile.targetId &&
+          enemy.hp > 0 &&
+          this.canTowerKindTarget(projectile.kind, projectile.towerLevel, enemy),
+      );
       if (!target) continue;
       const targetPosition = this.enemyPosition(target);
       const gap = distance(projectile.position, targetPosition);
@@ -1845,6 +1932,7 @@ export class Game {
   }
 
   private resolveProjectile(projectile: Projectile, target: Enemy): void {
+    if (!this.canTowerKindTarget(projectile.kind, projectile.towerLevel, target)) return;
     const accent = TOWER_DEFINITIONS[projectile.kind].accent;
     const damageAgainst = (enemy: Enemy): number => {
       if (projectile.kind !== "bomber" || projectile.towerLevel < 1 || enemy.burnTimer <= 0) return projectile.damage;
@@ -1855,7 +1943,12 @@ export class Game {
     if (projectile.splash > 0) {
       this.spawnExplosion(impact, accent, projectile.splash);
       const splashed = this.enemies
-        .filter((enemy) => enemy.id !== target.id && distance(this.enemyPosition(enemy), impact) <= projectile.splash);
+        .filter(
+          (enemy) =>
+            enemy.id !== target.id &&
+            this.canTowerKindTarget(projectile.kind, projectile.towerLevel, enemy) &&
+            distance(this.enemyPosition(enemy), impact) <= projectile.splash,
+        );
       splashed.forEach((enemy) => this.damageEnemy(enemy, damageAgainst(enemy), accent));
     } else this.spawnImpactDust(impact, accent);
   }
@@ -1874,8 +1967,15 @@ export class Game {
   private updateTimedBombs(delta: number): void {
     const survivors: TimedBomb[] = [];
     for (const bomb of this.timedBombs) {
+      const canBombTarget = (enemy: Enemy): boolean =>
+        bomb.sourceKind === undefined || this.canTowerKindTarget(bomb.sourceKind, bomb.towerLevel ?? 0, enemy);
       const proximityTarget = bomb.proximity
-        ? this.enemies.find((enemy) => enemy.hp > 0 && distance(this.enemyPosition(enemy), bomb.position) <= 27)
+        ? this.enemies.find(
+          (enemy) =>
+            enemy.hp > 0 &&
+            canBombTarget(enemy) &&
+            distance(this.enemyPosition(enemy), bomb.position) <= 27,
+        )
         : undefined;
       if (!bomb.proximity) bomb.timer -= delta;
       if ((bomb.proximity && !proximityTarget) || (!bomb.proximity && bomb.timer > 0)) {
@@ -1883,7 +1983,11 @@ export class Game {
         continue;
       }
       this.enemies
-        .filter((enemy) => distance(this.enemyPosition(enemy), bomb.position) <= bomb.radius)
+        .filter(
+          (enemy) =>
+            canBombTarget(enemy) &&
+            distance(this.enemyPosition(enemy), bomb.position) <= bomb.radius,
+        )
         .forEach((enemy) => {
           const canExploitBurn = !bomb.proximity || (bomb.towerLevel ?? 0) >= 1;
           const burningMultiplier = canExploitBurn && enemy.burnTimer > 0
@@ -1901,7 +2005,18 @@ export class Game {
 
   private damageEnemy(enemy: Enemy, amount: number, _color: string): void {
     if (enemy.hp <= 0) return;
-    const dealt = Math.min(enemy.hp, Math.max(0, amount));
+    const incoming = Math.max(0, amount);
+    if (incoming <= 0) return;
+
+    // Shields are a complete first-hit buffer: any damage beyond the
+    // remaining shield is discarded, and only a later hit can damage HP.
+    if (enemy.shieldHp > 0) {
+      enemy.shieldHp = Math.max(0, enemy.shieldHp - incoming);
+      enemy.hitFlash = 1;
+      return;
+    }
+
+    const dealt = Math.min(enemy.hp, incoming);
     enemy.hp -= dealt;
     this.damageIncomeRemainder += dealt * ECONOMY_RULES.damageCashPerHp;
     const payout = Math.floor(this.damageIncomeRemainder);
@@ -2308,18 +2423,23 @@ export class Game {
     const context = this.context;
     const viewport = this.viewport;
     context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = "#07090a";
+    context.fillStyle = this.map.palette.field;
     context.fillRect(0, 0, this.canvas.width, this.canvas.height);
     context.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.x, viewport.y);
     const shakeX = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;
     const shakeY = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;
     context.save();
+    context.beginPath();
+    context.rect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    context.clip();
     context.translate(shakeX, shakeY);
-    this.drawField();
-    this.drawPath();
+    context.drawImage(this.staticMapCanvas, 0, 0);
+    this.drawPathSignal();
     this.drawCore();
     this.drawTowerRanges();
-    this.projectiles.filter((projectile) => projectile.delay <= 0).forEach((projectile) => this.drawProjectile(projectile));
+    for (const projectile of this.projectiles) {
+      if (projectile.delay <= 0) this.drawProjectile(projectile);
+    }
     this.timedBombs.forEach((bomb) => this.drawTimedBomb(bomb));
     this.towers.forEach((tower) => this.drawTower(tower));
     this.enemies.forEach((enemy) => this.drawEnemy(enemy));
@@ -2330,95 +2450,29 @@ export class Game {
     this.drawVignette();
   }
 
-  private drawField(): void {
-    const context = this.context;
-    context.fillStyle = this.map.palette.field;
-    context.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    const glow = context.createRadialGradient(650, 350, 20, 650, 350, 650);
-    glow.addColorStop(0, this.map.palette.glow);
-    glow.addColorStop(1, "rgba(0, 0, 0, 0)");
-    context.fillStyle = glow;
-    context.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    context.lineWidth = 1;
-    for (let x = 0; x <= WORLD_WIDTH; x += 40) {
-      context.strokeStyle = x % 200 === 0 ? "rgba(177,187,184,.08)" : "rgba(177,187,184,.035)";
-      context.beginPath();
-      context.moveTo(x, 0);
-      context.lineTo(x, WORLD_HEIGHT);
-      context.stroke();
-    }
-    for (let y = 0; y <= WORLD_HEIGHT; y += 40) {
-      context.strokeStyle = y % 200 === 0 ? "rgba(177,187,184,.08)" : "rgba(177,187,184,.035)";
-      context.beginPath();
-      context.moveTo(0, y);
-      context.lineTo(WORLD_WIDTH, y);
-      context.stroke();
-    }
-    context.fillStyle = "rgba(207, 218, 213, 0.035)";
-    [
-      [72, 76, 210, 66],
-      [505, 65, 185, 54],
-      [815, 566, 242, 64],
-      [235, 580, 180, 48],
-    ].forEach(([x = 0, y = 0, width = 0, height = 0]) => context.fillRect(x, y, width, height));
+  private drawField(context: CanvasRenderingContext2D): void {
+    drawMapField(context, this.map);
   }
 
-  private drawPath(): void {
+  private drawStaticPath(context: CanvasRenderingContext2D): void {
+    drawMapPath(context, this.map, this.mapPathShape);
+  }
+
+  private drawPathSignal(): void {
     const context = this.context;
     context.save();
     context.lineCap = "butt";
     context.lineJoin = "round";
-    context.beginPath();
-    this.map.path.forEach((point, index) => (index === 0 ? context.moveTo(point.x, point.y) : context.lineTo(point.x, point.y)));
-    context.strokeStyle = "rgba(0, 0, 0, .58)";
-    context.lineWidth = PATH_HALF_WIDTH * 2 + 18;
-    context.stroke();
-    context.strokeStyle = this.map.palette.path;
-    context.lineWidth = PATH_HALF_WIDTH * 2;
-    context.stroke();
     context.setLineDash([10, 13]);
     context.lineDashOffset = -this.elapsed * 11;
     context.strokeStyle = `${this.map.palette.accent}33`;
     context.lineWidth = 2;
-    context.stroke();
-    context.setLineDash([]);
-    context.strokeStyle = "rgba(235, 238, 229, .12)";
-    context.lineWidth = PATH_HALF_WIDTH * 2 - 14;
-    context.stroke();
-    context.globalCompositeOperation = "destination-over";
-    context.strokeStyle = "rgba(255,255,255,.02)";
-    context.lineWidth = PATH_HALF_WIDTH * 2 - 18;
-    context.stroke();
-    context.restore();
-
-    context.save();
-    context.font = "600 13px ui-monospace, monospace";
-    context.fillStyle = "rgba(218, 224, 218, .25)";
-    context.textAlign = "center";
-    context.fillText("ENTRY // 00", this.map.entryLabel.x, this.map.entryLabel.y);
-    context.fillText("PATHBOUND ZONE", this.map.pathLabel.x, this.map.pathLabel.y);
+    context.stroke(this.mapPathShape);
     context.restore();
   }
 
   private drawCore(): void {
-    const context = this.context;
-    const core = this.map.core;
-    context.save();
-    context.translate(core.x, core.y);
-    context.rotate(this.elapsed * 0.18);
-    context.strokeStyle = this.integrity <= 6 ? "#f25e57" : "#d5d9d2";
-    context.lineWidth = 2;
-    for (let size = 25; size <= 43; size += 9) {
-      context.strokeRect(-size, -size, size * 2, size * 2);
-      context.rotate(Math.PI / 8);
-    }
-    context.fillStyle = this.integrity <= 6 ? "rgba(242,94,87,.2)" : "rgba(213,217,210,.1)";
-    context.fillRect(-19, -19, 38, 38);
-    context.restore();
-    context.fillStyle = "rgba(231,235,227,.55)";
-    context.font = "600 13px ui-monospace, monospace";
-    context.textAlign = "center";
-    context.fillText("CORE", core.x, core.y + 64);
+    drawMapCore(this.context, this.map, this.elapsed * 0.18, this.integrity <= 6);
   }
 
   private drawTowerRanges(): void {
@@ -2709,7 +2763,12 @@ export class Game {
     context.textBaseline = "bottom";
     context.fillText(definition.name.toUpperCase(), position.x, position.y - radius - 12);
     context.restore();
-    this.drawBar(position.x - radius, position.y - radius - 9, radius * 2, definition.boss ? 5 : 4, enemy.hp / enemy.maxHp, sprite.accent);
+    const barX = position.x - radius;
+    const healthBarY = position.y - radius - 9;
+    if (enemy.maxShieldHp > 0) {
+      this.drawBar(barX, healthBarY - 6, radius * 2, definition.boss ? 4 : 3, enemy.shieldHp / enemy.maxShieldHp, "#f4c542");
+    }
+    this.drawBar(barX, healthBarY, radius * 2, definition.boss ? 5 : 4, enemy.hp / enemy.maxHp, sprite.accent);
   }
 
   private drawBossHealthbars(): void {
@@ -2724,15 +2783,17 @@ export class Game {
     bosses.slice(0, 3).forEach((enemy, index) => {
       const definition = getEnemyDefinition(enemy.kind);
       const width = 560;
+      const hasShield = enemy.maxShieldHp > 0;
       const height = 17;
       const x = (WORLD_WIDTH - width) / 2;
-      const y = 58 + index * 48;
+      const y = 58 + index * (hasShield ? 58 : 48);
+      const panelHeight = hasShield ? 49 : 39;
       context.save();
       context.fillStyle = "rgba(5,7,8,.9)";
       context.strokeStyle = `${definition.sprite.accent}aa`;
       context.lineWidth = 2;
-      context.fillRect(x - 10, y - 27, width + 20, 39);
-      context.strokeRect(x - 10, y - 27, width + 20, 39);
+      context.fillRect(x - 10, y - 27, width + 20, panelHeight);
+      context.strokeRect(x - 10, y - 27, width + 20, panelHeight);
       context.font = "800 14px ui-monospace, monospace";
       context.textAlign = "left";
       context.textBaseline = "bottom";
@@ -2741,7 +2802,12 @@ export class Game {
       context.textAlign = "right";
       context.fillStyle = "#f2f4ef";
       context.fillText(`${Math.ceil(enemy.hp).toLocaleString()} / ${enemy.maxHp.toLocaleString()} HP`, x + width, y - 7);
-      this.drawBar(x, y, width, height, enemy.hp / enemy.maxHp, definition.sprite.accent);
+      if (hasShield) {
+        this.drawBar(x, y, width, 7, enemy.shieldHp / enemy.maxShieldHp, "#f4c542");
+        this.drawBar(x, y + 10, width, height, enemy.hp / enemy.maxHp, definition.sprite.accent);
+      } else {
+        this.drawBar(x, y, width, height, enemy.hp / enemy.maxHp, definition.sprite.accent);
+      }
       context.restore();
     });
   }
@@ -2968,17 +3034,9 @@ export class Game {
 
   private drawVignette(): void {
     const context = this.context;
-    const gradient = context.createRadialGradient(
-      this.canvas.width / (this.canvas.width / WORLD_WIDTH) / 2,
-      this.canvas.height / (this.canvas.height / WORLD_HEIGHT) / 2,
-      160,
-      WORLD_WIDTH / 2,
-      WORLD_HEIGHT / 2,
-      690,
-    );
-    gradient.addColorStop(0, "rgba(0,0,0,0)");
-    gradient.addColorStop(1, "rgba(0,0,0,.56)");
-    context.fillStyle = gradient;
-    context.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    context.save();
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.drawImage(this.vignetteCanvas, 0, 0);
+    context.restore();
   }
 }

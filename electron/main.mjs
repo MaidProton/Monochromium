@@ -12,6 +12,7 @@ const saveSections = new Map([
   ["meta", "meta"],
   ["custom-modes", "customModes"],
   ["custom-enemies", "customEnemies"],
+  ["custom-maps", "customMaps"],
 ]);
 
 const updateFeedTemplate = configuredUpdateValue(updateConfig.feedUrl, "MONOCHROMIUM_UPDATE_FEED_URL");
@@ -65,6 +66,7 @@ const freshSave = () => ({
   meta: null,
   customModes: [],
   customEnemies: [],
+  customMaps: [],
 });
 
 const normalizeSave = (value) => {
@@ -74,6 +76,7 @@ const normalizeSave = (value) => {
     meta: source.meta ?? null,
     customModes: Array.isArray(source.customModes) ? source.customModes : [],
     customEnemies: Array.isArray(source.customEnemies) ? source.customEnemies : [],
+    customMaps: Array.isArray(source.customMaps) ? source.customMaps : [],
   };
 };
 

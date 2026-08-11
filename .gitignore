@@ -5,3 +5,4 @@ out/
 __pycache__/
 save_data/
 .DS_Store
+.monochromium-dev.pid

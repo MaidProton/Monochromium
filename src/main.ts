@@ -6,6 +6,8 @@ import {
   NORMAL_MODE,
   TOWER_DEFINITIONS,
   TOWER_ORDER,
+  WORLD_WIDTH,
+  WORLD_HEIGHT,
 } from "./game/config.ts";
 import { Game, type GameUiState } from "./game/Game.ts";
 import {
@@ -29,10 +31,30 @@ import {
   upsertCustomMode,
   type CustomModeDraft,
 } from "./game/customModes.ts";
+import {
+  MAP_THEME_PRESETS,
+  cacheCustomMapsLocally,
+  cloneCustomMap,
+  createBlockedZone,
+  createCustomMap,
+  customMapToDefinition,
+  deleteCustomMap,
+  loadCustomMaps,
+  sanitizeCustomMaps,
+  snapMapCoordinate,
+  terminalPoint,
+  terminalPosition,
+  upsertCustomMap,
+  validateCustomMap,
+  type CustomMapDraft,
+  type MapEdge,
+} from "./game/customMaps.ts";
 import { getAllEnemyDefinitions, getOfficialEnemyDefinitions, isKnownEnemyKind, setCustomEnemyRegistry } from "./game/enemyRegistry.ts";
+import { createMapPathShape, drawBlockedZone, drawMapCore, drawMapField, drawMapPath } from "./game/mapRendering.ts";
+import { clamp, distance, Polyline } from "./game/math.ts";
 import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, unlockEveryTower, unlockTower } from "./game/meta.ts";
 import { getDesktopEnvironment, hasDiskSaveApi, loadDiskSave, replaceDiskSave, type SaveBundle } from "./game/persistence.ts";
-import type { MapKind, ModeDefinition, TargetingMode, TowerKind } from "./game/types.ts";
+import type { BlockedZone, MapDefinition, MapKind, ModeDefinition, Point, TargetingMode, TowerKind } from "./game/types.ts";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
@@ -44,19 +66,23 @@ app.innerHTML = `
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
         <span><strong>MONOCHROMIUM</strong><small id="brand-map-label">COMMAND // PATHBOUND DEFENSE</small></span>
       </a>
+      <div class="stage-topline">
+        <span id="mode-label">MODE 01 // NORMAL</span>
+        <span id="threat-label">THREAT: DORMANT</span>
+      </div>
       <div class="top-stats" aria-label="Game status">
         <div class="stat core-stat">
-          <span class="stat-label">CORE</span>
+          <span class="stat-label">CORE INTEGRITY</span>
           <div class="integrity-track"><i id="integrity-fill"></i></div>
           <strong id="integrity-value">12 / 12</strong>
         </div>
         <div class="stat cash-stat">
-          <span class="stat-label">CASH</span>
+          <span class="stat-label">CREDITS</span>
           <strong id="shard-value">500</strong>
           <small id="pending-refund" hidden>+$0 NEXT WAVE</small>
         </div>
         <div class="stat">
-          <span class="stat-label">WAVE</span>
+          <span class="stat-label">WAVE INDEX</span>
           <strong id="wave-value">00</strong>
         </div>
       </div>
@@ -65,7 +91,7 @@ app.innerHTML = `
           <span>DBG</span>
         </button>
         <button class="icon-button" data-action="main-menu" aria-label="Return to main menu" title="Main menu">
-          <span>MNU</span>
+          <span>MENU</span>
         </button>
         <button class="icon-button" data-action="sound" aria-label="Toggle sound" title="Toggle sound">
           <span id="sound-icon">SND</span>
@@ -79,13 +105,10 @@ app.innerHTML = `
       </div>
     </header>
 
+    <div class="playfield-layout">
     <main class="game-stage" aria-label="Battlefield">
       <canvas id="game-canvas" aria-label="Monochromium game battlefield"></canvas>
       <div class="scanline" aria-hidden="true"></div>
-      <div class="stage-topline">
-        <span id="mode-label">MODE 01 // NORMAL</span>
-        <span id="threat-label">THREAT: DORMANT</span>
-      </div>
       <div class="event-console" id="battle-log" aria-label="Event log">
         <div class="console-head"><span>FIELD LOG</span><time id="clock">00:00:00</time></div>
         <div id="log-entries" class="log-entries" aria-live="polite">
@@ -122,8 +145,7 @@ app.innerHTML = `
         </div>
         <div class="menu-actions">
           <button class="primary-button wide" data-action="open-modes">PLAY MODES <span>→</span></button>
-          <button class="secondary-button wide" data-action="new-mode">MODE CREATOR</button>
-          <button class="secondary-button wide" data-action="open-enemies">ENEMY CREATOR</button>
+          <button class="secondary-button wide" data-action="open-creators">CREATORS</button>
           <button class="secondary-button wide" data-action="open-shop">TOWER SHOP</button>
         </div>
       <div class="save-tools">
@@ -136,6 +158,24 @@ app.innerHTML = `
         <div><span>SYSTEM UPDATE</span><strong id="update-status">Updater unavailable</strong></div>
         <div class="update-actions"><button class="secondary-button" data-action="check-update" id="check-update-button">CHECK</button><button class="primary-button" data-action="install-update" id="install-update-button" hidden>RESTART &amp; INSTALL</button></div>
       </section>
+      </div>
+
+      <div class="menu-screen creator-hub" id="creator-hub" hidden>
+        <div class="onboarding-kicker">LOCAL DESIGN SYSTEM</div>
+        <h2>CREATOR<br>HUB</h2>
+        <p>Build and share the hostiles, timelines, and battlefields used by your simulations.</p>
+        <div class="creator-hub-grid">
+          <button data-action="creator-hub-modes">
+            <span>01 // TIMELINES</span><strong>MODE CREATOR</strong><p>Build finite wave schedules with official or custom enemies.</p><small><b id="creator-mode-count">0</b> SAVED MODES</small>
+          </button>
+          <button data-action="creator-hub-enemies">
+            <span>02 // HOSTILES</span><strong>ENEMY CREATOR</strong><p>Design enemy stats, geometry, shields, and special abilities.</p><small><b id="creator-enemy-count">0</b> SAVED ENEMIES</small>
+          </button>
+          <button data-action="creator-hub-maps">
+            <span>03 // BATTLEFIELDS</span><strong>MAP CREATOR</strong><p>Draw routes, themes, terminals, and restricted build zones.</p><small><b id="creator-map-count">0</b> SAVED MAPS</small>
+          </button>
+        </div>
+        <button class="secondary-button" data-action="back-main">BACK TO COMMAND</button>
       </div>
 
       <div class="menu-screen enemy-selection" id="enemy-selection" hidden>
@@ -158,7 +198,7 @@ app.innerHTML = `
             <div class="enemy-card-grid" id="custom-enemy-list"></div>
           </section>
         </div>
-        <button class="secondary-button" data-action="back-main">BACK TO COMMAND</button>
+        <button class="secondary-button" data-action="library-back">BACK</button>
       </div>
 
       <div class="menu-screen enemy-creator" id="enemy-creator" hidden>
@@ -178,6 +218,7 @@ app.innerHTML = `
               <label><span>COLOR</span><input data-enemy-field="color" type="color"></label>
               <label class="sides-field"><span>SHAPE SIDES <b id="enemy-sides-value">5</b></span><input data-enemy-field="sides" type="range" min="3" max="12" step="1"></label>
               <label><span>HP</span><input data-enemy-field="hp" type="number" min="1" step="1"></label>
+              <label><span>SHIELD HP</span><input data-enemy-field="shieldHp" type="number" min="0" step="1"></label>
               <label><span>SPEED</span><input data-enemy-field="speed" type="number" min="1" step="0.1"></label>
               <label><span>TOWER DAMAGE</span><input data-enemy-field="damage" type="number" min="0" step="1"></label>
               <label><span>ATTACK COOLDOWN</span><input data-enemy-field="attackInterval" type="number" min="0.1" step="0.05"></label>
@@ -228,26 +269,99 @@ app.innerHTML = `
             <div class="mode-list" id="custom-mode-list"></div>
           </section>
         </div>
-        <button class="secondary-button" data-action="back-main">BACK TO COMMAND</button>
+        <button class="secondary-button" data-action="library-back">BACK</button>
       </div>
 
       <div class="menu-screen map-selection" id="map-selection" hidden>
         <div class="onboarding-kicker">BATTLEFIELD SELECT</div>
         <h2>CHOOSE<br>A ROUTE</h2>
         <p id="selected-mode-copy">Normal Mode // 25 finite waves.</p>
-        <div class="map-grid">
-          ${Object.values(MAP_DEFINITIONS).map((map) => `
-            <button class="map-card ${map.kind === "sector07" ? "selected" : ""}" data-action="select-map" data-map="${map.kind}">
-              <span>MAP ${map.index.toString().padStart(2, "0")} // ${map.difficulty.toUpperCase()}</span>
-              <strong>${map.name}</strong>
-              <p>${map.description}</p>
-              <small><span id="map-reward-${map.kind}">${Math.round(map.rewardMultiplier * 100)}% COIN REWARD</span> <b id="clear-${map.kind}"></b></small>
-            </button>
-          `).join("")}
-        </div>
+        <div class="map-grid" id="play-map-grid"></div>
         <div class="menu-actions horizontal">
           <button class="secondary-button" data-action="back-modes">BACK</button>
           <button class="primary-button wide" id="start-mode-button" data-action="start-map" data-testid="begin-button">START NORMAL <span>→</span></button>
+        </div>
+      </div>
+
+      <div class="menu-screen map-library-screen" id="map-library" hidden>
+        <div class="mode-browser-heading">
+          <div><div class="onboarding-kicker">BATTLEFIELD DATABASE</div><h2>MAP LIST</h2></div>
+          <div class="creator-actions">
+            <input id="map-import-input" type="file" accept="application/json,.json" hidden>
+            <button class="secondary-button" data-action="import-map">IMPORT MAP</button>
+            <button class="primary-button" data-action="new-map">CREATE MAP <span>+</span></button>
+          </div>
+        </div>
+        <div class="map-library-grid">
+          <section>
+            <div class="library-label"><span>OFFICIAL MAPS</span><small>READ ONLY</small></div>
+            <div class="map-list" id="official-map-list"></div>
+          </section>
+          <section>
+            <div class="library-label"><span>CREATED MAPS</span><small>LOCAL // SANDBOX</small></div>
+            <div class="map-list" id="custom-map-list"></div>
+          </section>
+        </div>
+        <button class="secondary-button" data-action="library-back">BACK</button>
+      </div>
+
+      <div class="menu-screen map-creator" id="map-creator" hidden>
+        <div class="creator-topbar map-creator-topbar">
+          <div><div class="onboarding-kicker">SANDBOX ROUTE EDITOR</div><h2>MAP CREATOR</h2></div>
+          <div class="creator-actions">
+            <button class="secondary-button" data-action="map-editor-back">CANCEL</button>
+            <button class="secondary-button" id="map-test-button" data-action="map-test">TEST MAP</button>
+            <button class="primary-button" id="map-save-button" data-action="map-save">SAVE MAP</button>
+          </div>
+        </div>
+        <div class="map-editor-shell">
+          <section class="map-editor-settings">
+            <label><span>MAP NAME</span><input data-map-field="name" maxlength="48"></label>
+            <label class="wide"><span>DESCRIPTION</span><textarea data-map-field="description" maxlength="220" rows="2"></textarea></label>
+            <label><span>DIFFICULTY</span><select data-map-field="difficulty"><option>Easy</option><option>Medium</option><option>Hard</option></select></label>
+            <label><span>ENTRY EDGE</span><select data-map-field="entryEdge"><option value="left">LEFT</option><option value="right">RIGHT</option><option value="top">TOP</option><option value="bottom">BOTTOM</option></select></label>
+            <label><span>EXIT EDGE</span><select data-map-field="exitEdge"><option value="left">LEFT</option><option value="right">RIGHT</option><option value="top">TOP</option><option value="bottom">BOTTOM</option></select></label>
+          </section>
+          <div class="map-editor-main">
+            <div class="map-canvas-column">
+              <div class="map-editor-toolbar">
+                <div class="map-tool-group">
+                  <button data-action="map-tool-select" class="active" id="map-select-tool">SELECT</button>
+                  <button data-action="map-add-point">+ ROUTE POINT</button>
+                  <button data-action="map-add-zone">+ BLOCK ZONE</button>
+                  <button data-action="map-delete-selection" class="danger">DELETE</button>
+                </div>
+                <div class="map-tool-group">
+                  <button data-action="map-undo" id="map-undo-button">UNDO</button>
+                  <button data-action="map-redo" id="map-redo-button">REDO</button>
+                  <button data-action="map-reset">RESET</button>
+                </div>
+              </div>
+              <div class="map-editor-canvas-wrap"><canvas id="map-editor-canvas" width="1600" height="700" aria-label="Custom map route editor"></canvas></div>
+              <div class="map-editor-status"><span id="map-editor-selection">SELECT A ROUTE POINT OR BLOCKED ZONE</span><b id="map-path-length">0 UNITS</b></div>
+            </div>
+            <aside class="map-editor-side">
+              <section>
+                <div class="library-label"><span>PALETTE</span><small>LIVE PREVIEW</small></div>
+                <div class="map-theme-grid">
+                  ${MAP_THEME_PRESETS.map((theme) => `<button data-action="map-theme" data-theme="${theme.id}" style="--theme-field:${theme.field};--theme-path:${theme.path};--theme-accent:${theme.accent}"><i></i><span>${theme.name.toUpperCase()}</span></button>`).join("")}
+                </div>
+                <div class="map-color-grid">
+                  <label><span>FIELD</span><input data-map-field="field" type="color"></label>
+                  <label><span>PATH</span><input data-map-field="path" type="color"></label>
+                  <label><span>ACCENT</span><input data-map-field="accent" type="color"></label>
+                </div>
+              </section>
+              <section class="map-help">
+                <div class="library-label"><span>CONTROLS</span><small>20 UNIT GRID</small></div>
+                <p>Drag route nodes and terminals. Double-click a route segment to insert a point. Drag zones to move them; drag the bright corner to resize.</p>
+              </section>
+              <section class="map-validation">
+                <div class="library-label"><span>VALIDATION</span><small id="map-validation-state">CHECKING</small></div>
+                <ul id="map-validation-errors"></ul>
+              </section>
+            </aside>
+          </div>
         </div>
       </div>
 
@@ -312,77 +426,78 @@ app.innerHTML = `
         <div class="onboarding-kicker danger">CORE SIGNAL LOST</div>
         <h2>THE LINE<br>WENT DARK</h2>
         <p id="game-over-copy">Your defense held through wave 00.</p>
-        <div class="menu-actions horizontal"><button class="secondary-button" data-action="main-menu">MAIN MENU</button><button class="primary-button wide" data-action="restart">TRY AGAIN <span>↻</span></button></div>
+        <div class="menu-actions horizontal"><button class="secondary-button" id="game-over-exit" data-action="main-menu">MAIN MENU</button><button class="primary-button wide" id="game-over-restart" data-action="restart">TRY AGAIN <span>↻</span></button></div>
       </div>
 
       <div class="victory" id="victory" hidden>
         <div class="onboarding-kicker victory-tone">MODE 01 COMPLETE</div>
         <h2>NORMAL<br>SECURED</h2>
         <p id="victory-copy">All 25 waves were cleared.</p>
-        <div class="menu-actions horizontal"><button class="secondary-button" data-action="main-menu">MAIN MENU</button><button class="primary-button wide" data-action="restart">RUN AGAIN <span>↻</span></button></div>
-      </div>
-
-      <div class="bottom-hud">
-        <div class="build-dock">
-          <div class="dock-label"><span>DEPLOY</span><small>1—0</small></div>
-          <div class="tower-list" id="tower-list">
-          ${TOWER_ORDER.map((kind) => TOWER_DEFINITIONS[kind])
-            .map(
-              (tower, index) => `
-                <button class="tower-card" data-kind="${tower.kind}" data-testid="tower-${tower.kind}">
-                  <span class="hotkey">${index === 9 ? "0" : index + 1}</span>
-                  <span class="tower-glyph" style="--accent:${tower.accent};--dim:${tower.dimAccent}">${tower.glyph}</span>
-                  <span class="tower-copy">
-                    <strong>${tower.name}</strong>
-                    <small>${tower.onPath.title} / ${tower.offPath.title}</small>
-                  </span>
-                  <span class="cost-stack">
-                    <small class="stock-count" id="stock-${tower.kind}">x${tower.copyLimit}</small>
-                    <span class="cost">$${tower.cost}</span>
-                  </span>
-                </button>
-              `,
-            )
-            .join("")}
-          </div>
-        </div>
-        <div class="wave-controls">
-          <span id="enemy-count">NO HOSTILES</span>
-          <div class="wave-button automatic" id="wave-button" data-testid="wave-button">NEXT WAVE <b>3</b></div>
-        </div>
+        <div class="menu-actions horizontal"><button class="secondary-button" id="victory-exit" data-action="main-menu">MAIN MENU</button><button class="primary-button wide" id="victory-restart" data-action="restart">RUN AGAIN <span>↻</span></button></div>
       </div>
 
       <button class="selected-pill" id="selected-pill" data-action="reopen-inspector" hidden>
         <span id="selected-pill-label">CONSTRUCT SELECTED</span>
         <b id="selected-pill-state">OPEN PANEL</b>
       </button>
+    </main>
 
       <aside class="tower-inspector" id="tower-inspector" aria-label="Selected tower controls" hidden>
         <div class="inspector-header">
-          <div><span>CONSTRUCT LINK</span><small>UPGRADE // TARGET // COUNTER + ABILITY</small></div>
+          <div><span>CONSTRUCT LINK</span><small>UPGRADE // TARGET // SYSTEMS</small></div>
           <button data-action="close-inspector" aria-label="Close tower inspector">×</button>
         </div>
         <section class="selection-panel" id="selection-panel"></section>
         <div class="combat-dock">
           <div class="action-module counter-module">
-            <div class="action-readout"><span>COUNTER</span><strong id="counter-status">NO LINK</strong></div>
-            <div class="cooldown-track"><i id="counter-cooldown-fill"></i></div>
             <button class="combat-button counter-button" data-action="counter" data-testid="counter-button" disabled>
-              <span>REACT</span><kbd>SPACE</kbd>
+              <kbd>SPACE</kbd><span>COUNTER</span>
             </button>
+            <div class="action-readout"><span>STATE</span><strong id="counter-status">NO LINK</strong></div>
+            <div class="cooldown-track"><i id="counter-cooldown-fill"></i></div>
             <small id="counter-hint">Requires a pathbound construct</small>
           </div>
           <div class="action-module ability-module">
-            <div class="action-readout"><span>ABILITY</span><strong id="ability-status">NO LINK</strong></div>
-            <div class="cooldown-track"><i id="ability-cooldown-fill"></i></div>
             <button class="combat-button ability-button" data-action="ability" data-testid="ability-button" disabled>
-              <span>ACTIVATE</span><kbd>Q</kbd>
+              <kbd>Q</kbd><span>ABILITY</span>
             </button>
+            <div class="action-readout"><span>STATE</span><strong id="ability-status">NO LINK</strong></div>
+            <div class="cooldown-track"><i id="ability-cooldown-fill"></i></div>
             <small id="ability-hint">No active ability unlocked</small>
           </div>
         </div>
       </aside>
-    </main>
+    </div>
+
+    <div class="bottom-hud">
+      <div class="build-dock">
+        <div class="dock-label"><span>DEPLOY</span><small>1—0</small></div>
+        <div class="tower-list" id="tower-list">
+        ${TOWER_ORDER.map((kind) => TOWER_DEFINITIONS[kind])
+          .map(
+            (tower, index) => `
+              <button class="tower-card" data-kind="${tower.kind}" data-testid="tower-${tower.kind}">
+                <span class="hotkey">${index === 9 ? "0" : index + 1}</span>
+                <span class="tower-glyph" style="--accent:${tower.accent};--dim:${tower.dimAccent}">${tower.glyph}</span>
+                <span class="tower-copy">
+                  <strong>${tower.name}</strong>
+                  <small>${tower.onPath.title} / ${tower.offPath.title}</small>
+                </span>
+                <span class="cost-stack">
+                  <small class="stock-count" id="stock-${tower.kind}">x${tower.copyLimit}</small>
+                  <span class="cost">$${tower.cost}</span>
+                </span>
+              </button>
+            `,
+          )
+          .join("")}
+        </div>
+      </div>
+      <div class="wave-controls">
+        <span id="enemy-count">NO HOSTILES</span>
+        <div class="wave-button automatic" id="wave-button" data-testid="wave-button">NEXT WAVE <b>3</b></div>
+      </div>
+    </div>
 
     <footer class="site-footer">
       <span>RMB / ESC <b>CANCEL</b></span>
@@ -402,11 +517,16 @@ const query = <T extends Element>(selector: string): T => {
 };
 
 const canvas = query<HTMLCanvasElement>("#game-canvas");
+const shell = query<HTMLDivElement>(".shell");
 const mainMenu = query<HTMLDivElement>("#main-menu");
+const creatorHub = query<HTMLDivElement>("#creator-hub");
 const enemySelection = query<HTMLDivElement>("#enemy-selection");
 const enemyCreator = query<HTMLDivElement>("#enemy-creator");
 const modeSelection = query<HTMLDivElement>("#mode-selection");
 const mapSelection = query<HTMLDivElement>("#map-selection");
+const mapLibrary = query<HTMLDivElement>("#map-library");
+const mapCreator = query<HTMLDivElement>("#map-creator");
+const mapEditorCanvas = query<HTMLCanvasElement>("#map-editor-canvas");
 const modeCreator = query<HTMLDivElement>("#mode-creator");
 const towerShop = query<HTMLDivElement>("#tower-shop");
 const gameOverPanel = query<HTMLDivElement>("#game-over");
@@ -425,16 +545,24 @@ let selectionSignature = "";
 let inspectorSuppressed = false;
 let lastSelectedTowerId: number | null = null;
 let progress = loadProgress();
-let selectedMapKind: MapKind = "sector07";
-let activeMapKind: MapKind = "sector07";
+let selectedMap: MapDefinition = MAP_DEFINITIONS.sector07;
+let activeMap: MapDefinition = MAP_DEFINITIONS.sector07;
 let customEnemies = loadCustomEnemies();
 setCustomEnemyRegistry(customEnemies);
 let customModes = loadCustomModes();
+let customMaps = loadCustomMaps();
 let selectedMode: ModeDefinition = NORMAL_MODE;
 let activeMode: ModeDefinition = NORMAL_MODE;
 let creatorDraft: CustomModeDraft | null = null;
 let creatorWaveIndex = 0;
 let enemyDraft: CustomEnemyDraft | null = null;
+let mapDraft: CustomMapDraft | null = null;
+let mapHistory: CustomMapDraft[] = [];
+let mapFuture: CustomMapDraft[] = [];
+let mapSelectionState: { type: "point"; index: number } | { type: "zone"; id: string } | null = null;
+let mapDragState: { type: "point" | "zone" | "resize"; start: Point; original: CustomMapDraft } | null = null;
+let libraryReturnScreen: "main" | "creators" = "main";
+let mapTestActive = false;
 const selectedEnemyIds = new Set<string>();
 let runSettled = false;
 const BATTLE_LOG_HIDDEN_KEY = "monochromium:battle-log-hidden";
@@ -526,6 +654,23 @@ const exportModeFile = (mode: CustomModeDraft): void => {
   setSaveStatus(`Mode "${mode.name}" exported.`, "good");
 };
 
+const exportMapFile = (map: CustomMapDraft): void => {
+  downloadJson(`monochromium-map-${safeFilename(map.name)}.json`, {
+    type: "monochromium-custom-map",
+    version: 1,
+    map,
+  });
+  setSaveStatus(`Map "${map.name}" exported.`, "good");
+};
+
+const getAllMapDefinitions = (): MapDefinition[] => [
+  ...Object.values(MAP_DEFINITIONS),
+  ...customMaps.map(customMapToDefinition),
+];
+
+const getMapDefinition = (kind: string): MapDefinition | null =>
+  getAllMapDefinitions().find((map) => map.kind === kind) ?? null;
+
 const renderUpdateState = (state: MonochromiumUpdateState): void => {
   updateStatus.textContent = state.message;
   updateStatus.dataset["status"] = state.status;
@@ -554,6 +699,7 @@ const currentSaveBundle = (): SaveBundle => ({
   meta: progress,
   customModes,
   customEnemies,
+  customMaps,
 });
 
 const exportSaveBackup = async (): Promise<void> => {
@@ -583,9 +729,9 @@ const renderMeta = (): void => {
     card.disabled = owned;
     query<HTMLElement>(`#shop-price-${kind}`).textContent = owned ? "OWNED" : `${cost.toLocaleString()} COINS`;
   });
-  (Object.keys(MAP_DEFINITIONS) as MapKind[]).forEach((kind) => {
-    query<HTMLElement>(`#clear-${kind}`).textContent = progress.clearedMaps.includes(kind) ? "// CLEARED" : "";
-  });
+  query<HTMLElement>("#creator-mode-count").textContent = customModes.length.toString();
+  query<HTMLElement>("#creator-enemy-count").textContent = customEnemies.length.toString();
+  query<HTMLElement>("#creator-map-count").textContent = customMaps.length.toString();
 };
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"]/g, (character) => ({
@@ -609,11 +755,16 @@ const enemyShapeCard = (name: string, color: string, sides: number): string => {
   return `<span class="enemy-card-shape" style="background:${color};clip-path:${polygonClipPath(sides)}">${glyph}</span>`;
 };
 
+const enemyStatLine = (enemy: { hp: number; shieldHp: number; speed: number; damage: number }): string => {
+  const shield = enemy.shieldHp > 0 ? ` // ${enemy.shieldHp.toLocaleString()} SHIELD` : "";
+  return `${enemy.hp.toLocaleString()} HP${shield} · ${enemy.speed} SPEED · ${enemy.damage} DMG`;
+};
+
 const renderEnemyList = (): void => {
   query<HTMLElement>("#official-enemy-list").innerHTML = getOfficialEnemyDefinitions().map((enemy) => {
     const sides = enemy.sprite.shape === "circle" ? 12 : enemy.sprite.shape === "hexagon" ? 6 : 4;
     const specials = [enemy.hidden ? "HIDDEN" : "", enemy.summon ? "SUMMONER" : "", enemy.shockwave ? "STUN" : "", enemy.boss ? "BOSS" : ""].filter(Boolean).join(" // ");
-    return `<article class="enemy-library-card official">${enemyShapeCard(enemy.name, enemy.sprite.fill.startsWith("#") ? enemy.sprite.fill : enemy.sprite.accent, sides)}<div><small>OFFICIAL // READ ONLY</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemy.hp.toLocaleString()} HP · ${enemy.speed} SPEED · ${enemy.damage} DMG</p>${specials ? `<b>${specials}</b>` : ""}</div></article>`;
+    return `<article class="enemy-library-card official">${enemyShapeCard(enemy.name, enemy.sprite.fill.startsWith("#") ? enemy.sprite.fill : enemy.sprite.accent, sides)}<div><small>OFFICIAL // READ ONLY</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemyStatLine(enemy)}</p>${specials ? `<b>${specials}</b>` : ""}</div></article>`;
   }).join("");
   const list = query<HTMLElement>("#custom-enemy-list");
   if (customEnemies.length === 0) {
@@ -623,7 +774,7 @@ const renderEnemyList = (): void => {
   }
   list.innerHTML = customEnemies.map((enemy) => {
     const specials = [enemy.hidden ? "HIDDEN" : "", enemy.summoningEnabled ? "SUMMONER" : "", enemy.stunningEnabled ? "STUN" : "", enemy.boss ? "BOSS" : ""].filter(Boolean).join(" // ");
-    return `<article class="enemy-library-card">${enemyShapeCard(enemy.name, enemy.color, enemy.sides)}<div><small>CREATED // ${enemy.sides} SIDES</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemy.hp.toLocaleString()} HP · ${enemy.speed} SPEED · ${enemy.damage} DMG</p>${specials ? `<b>${specials}</b>` : ""}</div><div class="enemy-card-actions"><label class="enemy-select"><input type="checkbox" data-enemy-select="${escapeHtml(enemy.id)}" ${selectedEnemyIds.has(enemy.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EXPORT</button><button data-action="edit-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EDIT</button><button class="danger" data-action="delete-enemy" data-enemy-id="${escapeHtml(enemy.id)}">DELETE</button></div></article>`;
+    return `<article class="enemy-library-card">${enemyShapeCard(enemy.name, enemy.color, enemy.sides)}<div><small>CREATED // ${enemy.sides} SIDES</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemyStatLine(enemy)}</p>${specials ? `<b>${specials}</b>` : ""}</div><div class="enemy-card-actions"><label class="enemy-select"><input type="checkbox" data-enemy-select="${escapeHtml(enemy.id)}" ${selectedEnemyIds.has(enemy.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EXPORT</button><button data-action="edit-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EDIT</button><button class="danger" data-action="delete-enemy" data-enemy-id="${escapeHtml(enemy.id)}">DELETE</button></div></article>`;
   }).join("");
   updateSelectedEnemyCount();
 };
@@ -635,6 +786,7 @@ const renderEnemyCreator = (): void => {
   field("color").value = enemyDraft.color;
   field("sides").value = enemyDraft.sides.toString();
   field("hp").value = enemyDraft.hp.toString();
+  field("shieldHp").value = enemyDraft.shieldHp.toString();
   field("speed").value = enemyDraft.speed.toString();
   field("damage").value = enemyDraft.damage.toString();
   field("attackInterval").value = enemyDraft.attackInterval.toString();
@@ -658,10 +810,10 @@ const renderEnemyCreator = (): void => {
   preview.style.background = enemyDraft.color;
   query<HTMLElement>("#enemy-glyph-preview").textContent = enemyDraft.name.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "CE";
   query<HTMLElement>("#enemy-name-preview").textContent = enemyDraft.name.toUpperCase();
-  query<HTMLElement>("#enemy-preview-stats").textContent = `${enemyDraft.hp.toLocaleString()} HP // ${enemyDraft.speed} SPEED // ${enemyDraft.damage} DMG`;
+  query<HTMLElement>("#enemy-preview-stats").textContent = enemyStatLine(enemyDraft).replaceAll(" · ", " // ");
   query<HTMLElement>("#summon-enemy-options").innerHTML = getAllEnemyDefinitions()
     .filter((enemy) => enemy.kind !== enemyDraft!.id)
-    .map((enemy) => `<label><input type="checkbox" data-summon-kind="${escapeHtml(enemy.kind)}" ${enemyDraft!.summonKinds.includes(enemy.kind) ? "checked" : ""}><span>${escapeHtml(enemy.name)}</span><small>${enemy.kind.startsWith("custom-enemy:") ? "CREATED" : "OFFICIAL"} // ${enemy.hp} HP</small></label>`)
+    .map((enemy) => `<label><input type="checkbox" data-summon-kind="${escapeHtml(enemy.kind)}" ${enemyDraft!.summonKinds.includes(enemy.kind) ? "checked" : ""}><span>${escapeHtml(enemy.name)}</span><small>${enemy.kind.startsWith("custom-enemy:") ? "CREATED" : "OFFICIAL"} // ${enemyStatLine(enemy).replaceAll(" · ", " // ")}</small></label>`)
     .join("");
 };
 
@@ -694,15 +846,45 @@ const renderModeList = (): void => {
   }).join("");
 };
 
+const mapPreviewSvg = (map: MapDefinition): string => {
+  const pathData = map.path.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(0)} ${point.y.toFixed(0)}`).join(" ");
+  const zones = map.blockedZones.map((zone) => `<rect x="${zone.x}" y="${zone.y}" width="${zone.width}" height="${zone.height}" fill="${map.palette.accent}" opacity=".18"/>`).join("");
+  return `<svg class="map-preview" viewBox="0 0 ${WORLD_WIDTH} ${WORLD_HEIGHT}" aria-hidden="true"><rect width="${WORLD_WIDTH}" height="${WORLD_HEIGHT}" fill="${map.palette.field}"/>${zones}<path d="${pathData}" fill="none" stroke="#000" stroke-width="118"/><path d="${pathData}" fill="none" stroke="${map.palette.path}" stroke-width="100"/><circle cx="${map.core.x}" cy="${map.core.y}" r="34" fill="none" stroke="${map.palette.accent}" stroke-width="8"/></svg>`;
+};
+
+const mapLibraryCard = (map: MapDefinition, custom: CustomMapDraft | null): string => `
+  <article class="map-library-card">
+    ${mapPreviewSvg(map)}
+    <div><small>${map.isCustom ? "CREATED // SANDBOX" : `OFFICIAL // MAP ${map.index.toString().padStart(2, "0")}`}</small><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><b>${map.difficulty.toUpperCase()} // ${Math.round(new Polyline(map.path).totalLength).toLocaleString()} ROUTE UNITS // ${map.blockedZones.length} BLOCK ZONES</b></div>
+    ${custom ? `<div class="map-card-actions"><button data-action="export-map" data-map-id="${escapeHtml(custom.id)}">EXPORT</button><button data-action="edit-map" data-map-id="${escapeHtml(custom.id)}">EDIT</button><button class="danger" data-action="delete-map" data-map-id="${escapeHtml(custom.id)}">DELETE</button></div>` : ""}
+  </article>`;
+
+const renderMapLibrary = (): void => {
+  query<HTMLElement>("#official-map-list").innerHTML = Object.values(MAP_DEFINITIONS)
+    .map((map) => mapLibraryCard(map, null)).join("");
+  const list = query<HTMLElement>("#custom-map-list");
+  list.innerHTML = customMaps.length === 0
+    ? `<div class="empty-mode-list"><strong>NO CREATED MAPS</strong><span>Create a route, palette, and restricted build layout.</span></div>`
+    : customMaps.map((draft) => mapLibraryCard(customMapToDefinition(draft), draft)).join("");
+};
+
+const renderPlayMapGrid = (): void => {
+  const maps = getAllMapDefinitions();
+  if (!maps.some((map) => map.kind === selectedMap.kind)) selectedMap = MAP_DEFINITIONS.sector07;
+  query<HTMLElement>("#play-map-grid").innerHTML = maps.map((map) => {
+    const rewardCopy = map.isCustom || selectedMode.isCustom
+      ? "SANDBOX // NO PROFILE REWARDS"
+      : `${Math.round(map.rewardMultiplier * 100)}% COIN REWARD`;
+    const cleared = !map.isCustom && progress.clearedMaps.some((kind) => kind === map.kind) ? "// CLEARED" : "";
+    return `<button class="map-card ${map.kind === selectedMap.kind ? "selected" : ""}" data-action="select-map" data-map="${escapeHtml(map.kind)}">${mapPreviewSvg(map)}<span>${map.isCustom ? "CUSTOM" : `MAP ${map.index.toString().padStart(2, "0")}`} // ${map.difficulty.toUpperCase()}</span><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><small>${rewardCopy} <b>${cleared}</b></small></button>`;
+  }).join("");
+};
+
 const updateSelectedModeCopy = (): void => {
   query<HTMLElement>("#selected-mode-copy").textContent = `${selectedMode.name} // ${selectedMode.waves.length} finite ${selectedMode.waves.length === 1 ? "wave" : "waves"}.${selectedMode.isCustom ? " Created modes provide no profile rewards." : " Official map-adjusted profile rewards are enabled."}`;
   const compactName = selectedMode.name.length > 24 ? `${selectedMode.name.slice(0, 23)}…` : selectedMode.name;
   query<HTMLButtonElement>("#start-mode-button").innerHTML = `START ${escapeHtml(compactName.toUpperCase())} <span>→</span>`;
-  Object.values(MAP_DEFINITIONS).forEach((map) => {
-    query<HTMLElement>(`#map-reward-${map.kind}`).textContent = selectedMode.isCustom
-      ? "CUSTOM MODE // NO PROFILE REWARD"
-      : `${Math.round(map.rewardMultiplier * 100)}% COIN REWARD`;
-  });
+  renderPlayMapGrid();
 };
 
 const renderCreator = (): void => {
@@ -726,7 +908,7 @@ const renderCreator = (): void => {
     const start = blockStart;
     blockStart += block.nextBlockDelay;
     const enemyOptions = getAllEnemyDefinitions().map((enemy) =>
-      `<option value="${enemy.kind}" ${enemy.kind === block.enemy ? "selected" : ""}>${escapeHtml(enemy.name)} // ${enemy.hp} HP${enemy.kind.startsWith("custom-enemy:") ? " // CREATED" : ""}</option>`,
+      `<option value="${enemy.kind}" ${enemy.kind === block.enemy ? "selected" : ""}>${escapeHtml(enemy.name)} // ${enemyStatLine(enemy).replaceAll(" · ", " // ")}${enemy.kind.startsWith("custom-enemy:") ? " // CREATED" : ""}</option>`,
     ).join("");
     return `
       <article class="command-block" data-block-index="${index}">
@@ -752,12 +934,274 @@ const renderCreator = (): void => {
   });
 };
 
-const showFrontScreen = (screen: "main" | "enemies" | "enemy-creator" | "modes" | "maps" | "creator" | "shop"): void => {
+const mapCanvasPoint = (event: PointerEvent | MouseEvent): Point => {
+  const bounds = mapEditorCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - bounds.left) * (WORLD_WIDTH / bounds.width),
+    y: (event.clientY - bounds.top) * (WORLD_HEIGHT / bounds.height),
+  };
+};
+
+const mapPointForEditor = (point: Point): Point => ({
+  x: clamp(point.x, 0, WORLD_WIDTH),
+  y: clamp(point.y, 0, WORLD_HEIGHT),
+});
+
+const checkpointMapDraft = (): void => {
+  if (!mapDraft) return;
+  mapHistory.push(cloneCustomMap(mapDraft));
+  if (mapHistory.length > 50) mapHistory.shift();
+  mapFuture = [];
+};
+
+const mutateMapDraft = (mutation: (draft: CustomMapDraft) => void): void => {
+  if (!mapDraft) return;
+  checkpointMapDraft();
+  mutation(mapDraft);
+  renderMapEditor();
+};
+
+const drawMapEditor = (): void => {
+  if (!mapDraft) return;
+  const context = mapEditorCanvas.getContext("2d");
+  if (!context) return;
+  const definition = customMapToDefinition(mapDraft);
+  const shape = createMapPathShape(definition);
+  context.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  drawMapField(context, definition);
+  drawMapPath(context, definition, shape);
+  drawMapCore(context, definition);
+  if (mapSelectionState?.type === "zone") {
+    const selectedZoneId = mapSelectionState.id;
+    const zone = mapDraft.blockedZones.find((candidate) => candidate.id === selectedZoneId);
+    if (zone) {
+      drawBlockedZone(context, zone, definition.palette.accent, true);
+      context.fillStyle = definition.palette.accent;
+      context.fillRect(zone.x + zone.width - 12, zone.y + zone.height - 12, 24, 24);
+      context.strokeStyle = "#090c0d";
+      context.lineWidth = 3;
+      context.strokeRect(zone.x + zone.width - 12, zone.y + zone.height - 12, 24, 24);
+    }
+  }
+  mapDraft.path.forEach((rawPoint, index) => {
+    const point = mapPointForEditor(rawPoint);
+    const terminal = index === 0 || index === mapDraft!.path.length - 1;
+    const selected = mapSelectionState?.type === "point" && mapSelectionState.index === index;
+    context.beginPath();
+    context.arc(point.x, point.y, selected ? 18 : 14, 0, Math.PI * 2);
+    context.fillStyle = selected ? definition.palette.accent : terminal ? "#f1d07a" : "#d9dfdb";
+    context.fill();
+    context.strokeStyle = "#080b0c";
+    context.lineWidth = 4;
+    context.stroke();
+    context.fillStyle = "#080b0c";
+    context.font = "700 10px ui-monospace, monospace";
+    context.textAlign = "center";
+    context.fillText(terminal ? (index === 0 ? "IN" : "OUT") : `${index}`, point.x, point.y + 4);
+  });
+};
+
+function renderMapEditor(): void {
+  if (!mapDraft) return;
+  const field = <T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(name: string): T => query<T>(`[data-map-field='${name}']`);
+  field("name").value = mapDraft.name;
+  field("description").value = mapDraft.description;
+  field("difficulty").value = mapDraft.difficulty;
+  field("entryEdge").value = mapDraft.entryEdge;
+  field("exitEdge").value = mapDraft.exitEdge;
+  field("field").value = mapDraft.palette.field;
+  field("path").value = mapDraft.palette.path;
+  field("accent").value = mapDraft.palette.accent;
+  const validation = validateCustomMap(mapDraft);
+  query<HTMLElement>("#map-path-length").textContent = `${Math.round(validation.pathLength).toLocaleString()} ROUTE UNITS`;
+  const validationState = query<HTMLElement>("#map-validation-state");
+  validationState.textContent = validation.valid ? "ROUTE VALID" : `${validation.errors.length} ISSUES`;
+  validationState.classList.toggle("valid", validation.valid);
+  query<HTMLElement>("#map-validation-errors").innerHTML = validation.valid
+    ? "<li>Route, terminals, core clearance, and blocked zones are valid.</li>"
+    : validation.errors.slice(0, 8).map((error) => `<li>${escapeHtml(error)}</li>`).join("");
+  query<HTMLButtonElement>("#map-save-button").disabled = !validation.valid;
+  query<HTMLButtonElement>("#map-test-button").disabled = !validation.valid;
+  query<HTMLButtonElement>("#map-undo-button").disabled = mapHistory.length === 0;
+  query<HTMLButtonElement>("#map-redo-button").disabled = mapFuture.length === 0;
+  const selectionCopy = query<HTMLElement>("#map-editor-selection");
+  if (mapSelectionState?.type === "point") {
+    const point = mapDraft.path[mapSelectionState.index];
+    selectionCopy.textContent = point
+      ? `ROUTE POINT ${mapSelectionState.index.toString().padStart(2, "0")} // ${Math.round(point.x)}, ${Math.round(point.y)}`
+      : "SELECT A ROUTE POINT OR BLOCKED ZONE";
+  } else if (mapSelectionState?.type === "zone") {
+    const selectedZoneId = mapSelectionState.id;
+    const zone = mapDraft.blockedZones.find((candidate) => candidate.id === selectedZoneId);
+    selectionCopy.textContent = zone
+      ? `BLOCK ZONE // ${Math.round(zone.width)} × ${Math.round(zone.height)} AT ${Math.round(zone.x)}, ${Math.round(zone.y)}`
+      : "SELECT A ROUTE POINT OR BLOCKED ZONE";
+  } else selectionCopy.textContent = "SELECT A ROUTE POINT OR BLOCKED ZONE";
+  drawMapEditor();
+}
+
+const findMapPoint = (point: Point): number => {
+  if (!mapDraft) return -1;
+  let best = -1;
+  let bestDistance = 28;
+  mapDraft.path.forEach((candidate, index) => {
+    const separation = distance(point, mapPointForEditor(candidate));
+    if (separation < bestDistance) {
+      best = index;
+      bestDistance = separation;
+    }
+  });
+  return best;
+};
+
+const findMapZone = (point: Point): BlockedZone | null => {
+  if (!mapDraft) return null;
+  return [...mapDraft.blockedZones].reverse().find((zone) =>
+    point.x >= zone.x && point.x <= zone.x + zone.width && point.y >= zone.y && point.y <= zone.y + zone.height,
+  ) ?? null;
+};
+
+const insertMapPointAt = (point: Point): void => {
+  if (!mapDraft || mapDraft.path.length >= 32) return;
+  let bestIndex = -1;
+  let bestDistance = 42;
+  for (let index = 0; index < mapDraft.path.length - 1; index += 1) {
+    const a = mapDraft.path[index];
+    const b = mapDraft.path[index + 1];
+    if (!a || !b) continue;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared === 0) continue;
+    const amount = clamp(((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared, 0, 1);
+    const projected = { x: a.x + dx * amount, y: a.y + dy * amount };
+    const separation = distance(point, projected);
+    if (separation < bestDistance) {
+      bestDistance = separation;
+      bestIndex = index + 1;
+    }
+  }
+  if (bestIndex < 1) return;
+  mutateMapDraft((draft) => {
+    draft.path.splice(bestIndex, 0, {
+      x: clamp(snapMapCoordinate(point.x), 80, WORLD_WIDTH - 80),
+      y: clamp(snapMapCoordinate(point.y), 80, WORLD_HEIGHT - 80),
+    });
+    mapSelectionState = { type: "point", index: bestIndex };
+  });
+};
+
+const addMapZone = (): void => {
+  if (!mapDraft || mapDraft.blockedZones.length >= 24) return;
+  let chosen = createBlockedZone(120, 100);
+  outer: for (let y = 60; y <= WORLD_HEIGHT - 140; y += 80) {
+    for (let x = 60; x <= WORLD_WIDTH - 180; x += 100) {
+      const candidate = createBlockedZone(x, y);
+      const test = cloneCustomMap(mapDraft);
+      test.blockedZones.push(candidate);
+      if (validateCustomMap(test).valid) {
+        chosen = candidate;
+        break outer;
+      }
+    }
+  }
+  mutateMapDraft((draft) => {
+    draft.blockedZones.push(chosen);
+    mapSelectionState = { type: "zone", id: chosen.id };
+  });
+};
+
+mapEditorCanvas.addEventListener("pointerdown", (event) => {
+  if (!mapDraft || event.button !== 0) return;
+  const point = mapCanvasPoint(event);
+  const pointIndex = findMapPoint(point);
+  if (pointIndex >= 0) {
+    mapSelectionState = { type: "point", index: pointIndex };
+    mapDragState = { type: "point", start: point, original: cloneCustomMap(mapDraft) };
+  } else {
+    const zone = findMapZone(point);
+    if (zone) {
+      mapSelectionState = { type: "zone", id: zone.id };
+      const resizing = distance(point, { x: zone.x + zone.width, y: zone.y + zone.height }) <= 34;
+      mapDragState = { type: resizing ? "resize" : "zone", start: point, original: cloneCustomMap(mapDraft) };
+    } else {
+      mapSelectionState = null;
+      mapDragState = null;
+    }
+  }
+  mapEditorCanvas.setPointerCapture(event.pointerId);
+  renderMapEditor();
+});
+
+mapEditorCanvas.addEventListener("pointermove", (event) => {
+  if (!mapDraft || !mapDragState || !mapSelectionState) return;
+  const point = mapCanvasPoint(event);
+  const delta = { x: point.x - mapDragState.start.x, y: point.y - mapDragState.start.y };
+  if (mapSelectionState.type === "point" && mapDragState.type === "point") {
+    const originalPoint = mapDragState.original.path[mapSelectionState.index];
+    if (!originalPoint) return;
+    if (mapSelectionState.index === 0) {
+      const position = terminalPosition(mapDraft.entryEdge, { x: originalPoint.x + delta.x, y: originalPoint.y + delta.y });
+      mapDraft.path[0] = terminalPoint(mapDraft.entryEdge, position);
+    } else if (mapSelectionState.index === mapDraft.path.length - 1) {
+      const position = terminalPosition(mapDraft.exitEdge, { x: originalPoint.x + delta.x, y: originalPoint.y + delta.y });
+      mapDraft.path[mapDraft.path.length - 1] = terminalPoint(mapDraft.exitEdge, position);
+    } else {
+      mapDraft.path[mapSelectionState.index] = {
+        x: clamp(snapMapCoordinate(originalPoint.x + delta.x), 80, WORLD_WIDTH - 80),
+        y: clamp(snapMapCoordinate(originalPoint.y + delta.y), 80, WORLD_HEIGHT - 80),
+      };
+    }
+  } else if (mapSelectionState.type === "zone") {
+    const selectedZoneId = mapSelectionState.id;
+    const zoneIndex = mapDraft.blockedZones.findIndex((candidate) => candidate.id === selectedZoneId);
+    const zone = mapDraft.blockedZones[zoneIndex];
+    const original = mapDragState.original.blockedZones.find((candidate) => candidate.id === selectedZoneId);
+    if (!zone || !original) return;
+    if (mapDragState.type === "resize") {
+      mapDraft.blockedZones[zoneIndex] = {
+        ...zone,
+        width: clamp(snapMapCoordinate(original.width + delta.x), 80, WORLD_WIDTH - zone.x),
+        height: clamp(snapMapCoordinate(original.height + delta.y), 80, WORLD_HEIGHT - zone.y),
+      };
+    } else {
+      mapDraft.blockedZones[zoneIndex] = {
+        ...zone,
+        x: clamp(snapMapCoordinate(original.x + delta.x), 0, WORLD_WIDTH - zone.width),
+        y: clamp(snapMapCoordinate(original.y + delta.y), 0, WORLD_HEIGHT - zone.height),
+      };
+    }
+  }
+  renderMapEditor();
+});
+
+const finishMapDrag = (event: PointerEvent): void => {
+  if (!mapDraft || !mapDragState) return;
+  const changed = JSON.stringify(mapDraft) !== JSON.stringify(mapDragState.original);
+  if (changed) {
+    mapHistory.push(mapDragState.original);
+    if (mapHistory.length > 50) mapHistory.shift();
+    mapFuture = [];
+  }
+  mapDragState = null;
+  if (mapEditorCanvas.hasPointerCapture(event.pointerId)) mapEditorCanvas.releasePointerCapture(event.pointerId);
+  renderMapEditor();
+};
+
+mapEditorCanvas.addEventListener("pointerup", finishMapDrag);
+mapEditorCanvas.addEventListener("pointercancel", finishMapDrag);
+mapEditorCanvas.addEventListener("dblclick", (event) => insertMapPointAt(mapCanvasPoint(event)));
+
+const showFrontScreen = (screen: "main" | "creators" | "enemies" | "enemy-creator" | "modes" | "maps" | "creator" | "map-library" | "map-creator" | "shop"): void => {
+  shell.classList.remove("run-active");
   mainMenu.hidden = screen !== "main";
+  creatorHub.hidden = screen !== "creators";
   enemySelection.hidden = screen !== "enemies";
   enemyCreator.hidden = screen !== "enemy-creator";
   modeSelection.hidden = screen !== "modes";
   mapSelection.hidden = screen !== "maps";
+  mapLibrary.hidden = screen !== "map-library";
+  mapCreator.hidden = screen !== "map-creator";
   modeCreator.hidden = screen !== "creator";
   towerShop.hidden = screen !== "shop";
   gameOverPanel.hidden = true;
@@ -768,11 +1212,15 @@ const showFrontScreen = (screen: "main" | "enemies" | "enemy-creator" | "modes" 
   if (screen === "enemies") renderEnemyList();
   if (screen === "enemy-creator") renderEnemyCreator();
   if (screen === "maps") updateSelectedModeCopy();
+  if (screen === "map-library") renderMapLibrary();
+  if (screen === "map-creator") renderMapEditor();
   if (screen === "creator") renderCreator();
 };
 
 const selectMapCard = (kind: MapKind): void => {
-  selectedMapKind = kind;
+  const map = getMapDefinition(kind);
+  if (!map) return;
+  selectedMap = map;
   document.querySelectorAll<HTMLButtonElement>(".map-card").forEach((card) => {
     card.classList.toggle("selected", card.dataset["map"] === kind);
   });
@@ -781,19 +1229,18 @@ const selectMapCard = (kind: MapKind): void => {
 const settleRun = (victory: boolean, wave: number, mode: ModeDefinition): { coins: number; tokens: number } => {
   if (runSettled) return { coins: 0, tokens: 0 };
   runSettled = true;
-  if (mode.isCustom) return { coins: 0, tokens: 0 };
-  const map = MAP_DEFINITIONS[activeMapKind];
+  if (mode.isCustom || activeMap.isCustom || mapTestActive) return { coins: 0, tokens: 0 };
   const progressRatio = Math.min(1, wave / mode.waves.length);
   const coins = victory
-    ? Math.round(mode.reward.coins * map.rewardMultiplier)
-    : Math.round((15 + 75 * progressRatio) * map.rewardMultiplier);
+    ? Math.round(mode.reward.coins * activeMap.rewardMultiplier)
+    : Math.round((15 + 75 * progressRatio) * activeMap.rewardMultiplier);
   const tokens = victory ? mode.reward.tokens : wave >= 20 ? 1 : 0;
   progress.coins += coins;
   progress.tokens += tokens;
   progress.runs += 1;
   if (victory) {
     progress.victories += 1;
-    if (!progress.clearedMaps.includes(activeMapKind)) progress.clearedMaps.push(activeMapKind);
+    if (!progress.clearedMaps.some((kind) => kind === activeMap.kind)) progress.clearedMaps.push(activeMap.kind as keyof typeof MAP_DEFINITIONS);
   }
   saveProgress(progress);
   renderMeta();
@@ -925,6 +1372,11 @@ const render = (state: GameUiState): void => {
   }
   towerInspector.hidden = !state.selectedTower || inspectorSuppressed;
   selectedPill.hidden = !state.selectedTower || !inspectorSuppressed;
+  if (state.selectedTower) {
+    const inspectorOnLeft = state.selectedTower.tower.position.x >= WORLD_WIDTH / 2;
+    towerInspector.classList.toggle("inspector-left", inspectorOnLeft);
+    towerInspector.classList.toggle("inspector-right", !inspectorOnLeft);
+  }
   if (state.selectedTower) {
     const selected = state.selectedTower;
     query<HTMLElement>("#selected-pill-label").textContent = `LVL ${selected.tower.level} ${selected.definition.name.toUpperCase()}`;
@@ -1099,6 +1551,8 @@ const render = (state: GameUiState): void => {
     abilityHint.textContent = "Press Q to activate";
     abilityButton.classList.add("live");
   }
+  counter.title = `${counterStatus.textContent} // ${counterHint.textContent}`;
+  abilityButton.title = `${abilityStatus.textContent} // ${abilityHint.textContent}`;
 };
 
 const game = new Game(canvas, {
@@ -1106,17 +1560,25 @@ const game = new Game(canvas, {
   onLog: addLog,
   onGameOver: (wave) => {
     const reward = settleRun(false, wave, activeMode);
-    query<HTMLElement>("#game-over-copy").textContent = activeMode.isCustom
-      ? `Your custom simulation held through wave ${wave.toString().padStart(2, "0")}. Created modes do not provide profile rewards.`
+    query<HTMLElement>("#game-over-copy").textContent = mapTestActive
+      ? `Map test ended on wave ${wave.toString().padStart(2, "0")}. Return to the editor to adjust the route.`
+      : activeMode.isCustom || activeMap.isCustom
+      ? `Your sandbox simulation held through wave ${wave.toString().padStart(2, "0")}. Custom content does not provide profile rewards.`
       : `Your defense held through wave ${wave.toString().padStart(2, "0")}. Recovery paid ${reward.coins} Coins${reward.tokens > 0 ? ` and ${reward.tokens} Token` : ""}.`;
+    query<HTMLElement>("#game-over-exit").textContent = mapTestActive ? "RETURN TO EDITOR" : "MAIN MENU";
+    query<HTMLElement>("#game-over-restart").innerHTML = mapTestActive ? "TEST AGAIN <span>↻</span>" : "TRY AGAIN <span>↻</span>";
     gameOverPanel.hidden = false;
   },
   onVictory: (mode) => {
     const reward = settleRun(true, mode.waves.length, mode);
-    query<HTMLElement>("#victory-copy").textContent = mode.isCustom
-      ? `${mode.name} cleared on ${MAP_DEFINITIONS[activeMapKind].name}. Created modes do not provide profile rewards.`
-      : `${MAP_DEFINITIONS[activeMapKind].name} secured. Reward: ${reward.coins} Coins and ${reward.tokens} Tokens.`;
+    query<HTMLElement>("#victory-copy").textContent = mapTestActive
+      ? `${activeMap.name} passed a complete Normal Mode test. No profile rewards were granted.`
+      : mode.isCustom || activeMap.isCustom
+      ? `${mode.name} cleared on ${activeMap.name}. Custom content does not provide profile rewards.`
+      : `${activeMap.name} secured. Reward: ${reward.coins} Coins and ${reward.tokens} Tokens.`;
     query<HTMLElement>("#victory h2").innerHTML = `${escapeHtml(mode.name.toUpperCase())}<br>SECURED`;
+    query<HTMLElement>("#victory-exit").textContent = mapTestActive ? "RETURN TO EDITOR" : "MAIN MENU";
+    query<HTMLElement>("#victory-restart").innerHTML = mapTestActive ? "TEST AGAIN <span>↻</span>" : "RUN AGAIN <span>↻</span>";
     victoryPanel.hidden = false;
   },
 });
@@ -1139,13 +1601,16 @@ const hydrateDiskPersistence = async (): Promise<void> => {
     if (Array.isArray(disk.data.customEnemies)) customEnemies = sanitizeCustomEnemies(disk.data.customEnemies);
     setCustomEnemyRegistry(customEnemies);
     if (Array.isArray(disk.data.customModes)) customModes = sanitizeCustomModes(disk.data.customModes);
+    if (Array.isArray(disk.data.customMaps)) customMaps = sanitizeCustomMaps(disk.data.customMaps);
     cacheProgressLocally(progress);
     cacheCustomEnemiesLocally(customEnemies);
     cacheCustomModesLocally(customModes);
+    cacheCustomMapsLocally(customMaps);
     await replaceDiskSave(currentSaveBundle());
     game.setAvailableTowers(progress.unlockedTowers);
     renderMeta();
     renderModeList();
+    renderMapLibrary();
     setSaveStatus(
       desktopEnvironment
         ? `Desktop save active // ${desktopEnvironment.savePath}`
@@ -1212,15 +1677,64 @@ const importModeFromFile = async (file: File): Promise<void> => {
   }
 };
 
+const importMapFromFile = async (file: File): Promise<void> => {
+  try {
+    const parsed = JSON.parse(await file.text()) as { type?: unknown; map?: unknown };
+    if (parsed?.type !== "monochromium-custom-map" || !parsed.map) {
+      throw new Error("This is not a Monochromium map export.");
+    }
+    const imported = sanitizeCustomMaps([parsed.map])[0];
+    if (!imported) throw new Error("The export did not contain a valid playable map.");
+    if (customMaps.some((map) => map.id === imported.id) && !window.confirm(`Replace the existing map "${imported.name}"?`)) return;
+    customMaps = upsertCustomMap(customMaps, imported);
+    renderMapLibrary();
+    renderMeta();
+    addLog(`Map "${imported.name}" imported // sandbox rewards disabled.`, "good");
+    setSaveStatus(`Map "${imported.name}" imported.`, "good");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Invalid map export.";
+    addLog(`Map import failed // ${message}`, "danger");
+    setSaveStatus(`Map import failed // ${message}`, "danger");
+  }
+};
+
+const enterRun = (map: MapDefinition, mode: ModeDefinition, test: boolean): void => {
+  activeMap = map;
+  activeMode = mode;
+  mapTestActive = test;
+  runSettled = false;
+  [mainMenu, creatorHub, enemySelection, enemyCreator, modeSelection, mapSelection, mapLibrary, mapCreator, modeCreator, towerShop, gameOverPanel, victoryPanel]
+    .forEach((screen) => { screen.hidden = true; });
+  shell.classList.add("run-active");
+  game.startRun(activeMap, progress.unlockedTowers, activeMode);
+};
+
 const runAction = (action: string, value?: string, source?: HTMLElement): void => {
   switch (action) {
     case "open-modes":
+      libraryReturnScreen = "main";
       showFrontScreen("modes");
+      break;
+    case "open-creators":
+      showFrontScreen("creators");
+      break;
+    case "creator-hub-modes":
+      libraryReturnScreen = "creators";
+      showFrontScreen("modes");
+      break;
+    case "creator-hub-enemies":
+      libraryReturnScreen = "creators";
+      showFrontScreen("enemies");
+      break;
+    case "creator-hub-maps":
+      libraryReturnScreen = "creators";
+      showFrontScreen("map-library");
       break;
     case "open-shop":
       showFrontScreen("shop");
       break;
     case "open-enemies":
+      libraryReturnScreen = "main";
       showFrontScreen("enemies");
       break;
     case "new-enemy":
@@ -1280,6 +1794,9 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "import-mode":
       query<HTMLInputElement>("#mode-import-input").click();
       break;
+    case "import-map":
+      query<HTMLInputElement>("#map-import-input").click();
+      break;
     case "check-update":
       void checkForUpdate();
       break;
@@ -1288,6 +1805,9 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       break;
     case "back-main":
       showFrontScreen("main");
+      break;
+    case "library-back":
+      showFrontScreen(libraryReturnScreen);
       break;
     case "back-modes":
       showFrontScreen("modes");
@@ -1407,6 +1927,132 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       renderCreator();
       break;
     }
+    case "new-map":
+      mapDraft = createCustomMap();
+      mapHistory = [];
+      mapFuture = [];
+      mapSelectionState = null;
+      showFrontScreen("map-creator");
+      break;
+    case "edit-map": {
+      const map = customMaps.find((candidate) => candidate.id === source?.dataset["mapId"]);
+      if (!map) break;
+      mapDraft = cloneCustomMap(map);
+      mapHistory = [];
+      mapFuture = [];
+      mapSelectionState = null;
+      showFrontScreen("map-creator");
+      break;
+    }
+    case "export-map": {
+      const map = customMaps.find((candidate) => candidate.id === source?.dataset["mapId"]);
+      if (map) exportMapFile(map);
+      break;
+    }
+    case "delete-map": {
+      const map = customMaps.find((candidate) => candidate.id === source?.dataset["mapId"]);
+      if (!map || !window.confirm(`Delete "${map.name}" from this installation?`)) break;
+      customMaps = deleteCustomMap(customMaps, map.id);
+      if (selectedMap.kind === map.id) selectedMap = MAP_DEFINITIONS.sector07;
+      renderMapLibrary();
+      renderPlayMapGrid();
+      renderMeta();
+      break;
+    }
+    case "map-editor-back":
+      mapDraft = null;
+      mapHistory = [];
+      mapFuture = [];
+      mapSelectionState = null;
+      showFrontScreen("map-library");
+      break;
+    case "map-save":
+      if (!mapDraft || !validateCustomMap(mapDraft).valid) break;
+      customMaps = upsertCustomMap(customMaps, mapDraft);
+      const savedMap = customMaps.find((map) => map.id === mapDraft?.id) ?? mapDraft;
+      selectedMap = customMapToDefinition(savedMap);
+      addLog(`Map "${savedMap.name}" saved // sandbox rewards disabled.`, "good");
+      mapDraft = null;
+      mapHistory = [];
+      mapFuture = [];
+      renderMeta();
+      showFrontScreen("map-library");
+      break;
+    case "map-test":
+      if (!mapDraft || !validateCustomMap(mapDraft).valid) break;
+      enterRun(customMapToDefinition(mapDraft), NORMAL_MODE, true);
+      break;
+    case "map-tool-select":
+      break;
+    case "map-add-point": {
+      if (!mapDraft || mapDraft.path.length >= 32) break;
+      let index = mapDraft.path.length - 1;
+      if (mapSelectionState?.type === "point") index = Math.min(mapDraft.path.length - 1, mapSelectionState.index + 1);
+      const previous = mapDraft.path[Math.max(0, index - 1)];
+      const next = mapDraft.path[index];
+      if (!previous || !next) break;
+      mutateMapDraft((draft) => {
+        draft.path.splice(index, 0, {
+          x: clamp(snapMapCoordinate((previous.x + next.x) / 2), 80, WORLD_WIDTH - 80),
+          y: clamp(snapMapCoordinate((previous.y + next.y) / 2), 80, WORLD_HEIGHT - 80),
+        });
+        mapSelectionState = { type: "point", index };
+      });
+      break;
+    }
+    case "map-add-zone":
+      addMapZone();
+      break;
+    case "map-delete-selection":
+      if (!mapDraft || !mapSelectionState) break;
+      if (mapSelectionState.type === "point") {
+        const index = mapSelectionState.index;
+        if (index <= 0 || index >= mapDraft.path.length - 1) break;
+        mutateMapDraft((draft) => { draft.path.splice(index, 1); });
+      } else {
+        const id = mapSelectionState.id;
+        mutateMapDraft((draft) => { draft.blockedZones = draft.blockedZones.filter((zone) => zone.id !== id); });
+      }
+      mapSelectionState = null;
+      renderMapEditor();
+      break;
+    case "map-undo": {
+      const previous = mapHistory.pop();
+      if (!mapDraft || !previous) break;
+      mapFuture.push(cloneCustomMap(mapDraft));
+      mapDraft = previous;
+      mapSelectionState = null;
+      renderMapEditor();
+      break;
+    }
+    case "map-redo": {
+      const next = mapFuture.pop();
+      if (!mapDraft || !next) break;
+      mapHistory.push(cloneCustomMap(mapDraft));
+      mapDraft = next;
+      mapSelectionState = null;
+      renderMapEditor();
+      break;
+    }
+    case "map-reset": {
+      if (!mapDraft || !window.confirm("Reset the route and blocked zones to the starter layout?")) break;
+      const fresh = createCustomMap();
+      mutateMapDraft((draft) => {
+        draft.entryEdge = fresh.entryEdge;
+        draft.exitEdge = fresh.exitEdge;
+        draft.path = fresh.path.map((point) => ({ ...point }));
+        draft.blockedZones = [];
+      });
+      mapSelectionState = null;
+      renderMapEditor();
+      break;
+    }
+    case "map-theme": {
+      const theme = MAP_THEME_PRESETS.find((candidate) => candidate.id === source?.dataset["theme"]);
+      if (!mapDraft || !theme) break;
+      mutateMapDraft((draft) => { draft.palette = { field: theme.field, path: theme.path, accent: theme.accent }; });
+      break;
+    }
     case "select-map":
       if (value) selectMapCard(value as MapKind);
       break;
@@ -1418,24 +2064,18 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
         showFrontScreen("modes");
         break;
       }
-      activeMapKind = selectedMapKind;
-      runSettled = false;
-      mainMenu.hidden = true;
-      enemySelection.hidden = true;
-      enemyCreator.hidden = true;
-      modeSelection.hidden = true;
-      mapSelection.hidden = true;
-      modeCreator.hidden = true;
-      towerShop.hidden = true;
-      gameOverPanel.hidden = true;
-      victoryPanel.hidden = true;
-      activeMode = selectedMode;
-      game.startRun(activeMapKind, progress.unlockedTowers, activeMode);
+      enterRun(selectedMap, selectedMode, false);
       break;
       }
     case "main-menu":
       game.leaveRun();
-      showFrontScreen("main");
+      if (mapTestActive && mapDraft) {
+        mapTestActive = false;
+        showFrontScreen("map-creator");
+      } else {
+        mapTestActive = false;
+        showFrontScreen("main");
+      }
       break;
     case "buy-tower":
       if (value) {
@@ -1539,6 +2179,42 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("input", (event) => {
   const field = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  const mapField = field.dataset["mapField"];
+  if (mapDraft && mapField) {
+    if (mapField === "name") {
+      mapDraft.name = field.value.slice(0, 48);
+      return;
+    } else if (mapField === "description") {
+      mapDraft.description = field.value.slice(0, 220);
+      return;
+    } else if (mapField === "difficulty" && (field.value === "Easy" || field.value === "Medium" || field.value === "Hard")) {
+      mapDraft.difficulty = field.value;
+      return;
+    }
+    else if (mapField === "field" || mapField === "path" || mapField === "accent") mapDraft.palette[mapField] = field.value;
+    else if (mapField === "entryEdge" || mapField === "exitEdge") {
+      const edge = field.value as MapEdge;
+      if (edge !== "left" && edge !== "right" && edge !== "top" && edge !== "bottom") return;
+      checkpointMapDraft();
+      if (mapField === "entryEdge") {
+        const current = mapDraft.path[0];
+        if (current) {
+          const position = terminalPosition(mapDraft.entryEdge, current);
+          mapDraft.entryEdge = edge;
+          mapDraft.path[0] = terminalPoint(edge, position);
+        }
+      } else {
+        const current = mapDraft.path[mapDraft.path.length - 1];
+        if (current) {
+          const position = terminalPosition(mapDraft.exitEdge, current);
+          mapDraft.exitEdge = edge;
+          mapDraft.path[mapDraft.path.length - 1] = terminalPoint(edge, position);
+        }
+      }
+    }
+    renderMapEditor();
+    return;
+  }
   const enemyField = field.dataset["enemyField"];
   const summonKind = field.dataset["summonKind"];
   if (enemyDraft && (enemyField || summonKind)) {
@@ -1556,6 +2232,7 @@ app.addEventListener("input", (event) => {
     else if (enemyField === "color") enemyDraft.color = field.value;
     else if (enemyField === "sides") enemyDraft.sides = Math.max(3, Math.min(12, Math.round(number || 3)));
     else if (enemyField === "hp") enemyDraft.hp = Math.max(1, Math.min(10_000_000, Math.round(number || 1)));
+    else if (enemyField === "shieldHp") enemyDraft.shieldHp = Math.max(0, Math.min(10_000_000, Math.round(number || 0)));
     else if (enemyField === "speed") enemyDraft.speed = Math.max(1, Math.min(500, number || 1));
     else if (enemyField === "damage") enemyDraft.damage = Math.max(0, Math.min(1_000_000, Math.round(number || 0)));
     else if (enemyField === "attackInterval") enemyDraft.attackInterval = Math.max(0.1, Math.min(120, number || 0.1));
@@ -1582,7 +2259,7 @@ app.addEventListener("input", (event) => {
     preview.style.background = enemyDraft.color;
     query<HTMLElement>("#enemy-glyph-preview").textContent = enemyDraft.name.replace(/[^a-z0-9]/gi, "").slice(0, 2).toUpperCase() || "CE";
     query<HTMLElement>("#enemy-name-preview").textContent = enemyDraft.name.toUpperCase() || "CUSTOM ENEMY";
-    query<HTMLElement>("#enemy-preview-stats").textContent = `${enemyDraft.hp.toLocaleString()} HP // ${enemyDraft.speed} SPEED // ${enemyDraft.damage} DMG`;
+    query<HTMLElement>("#enemy-preview-stats").textContent = enemyStatLine(enemyDraft).replaceAll(" · ", " // ");
     return;
   }
 
@@ -1635,14 +2312,18 @@ query<HTMLInputElement>("#save-import-input").addEventListener("change", async (
     customEnemies = sanitizeCustomEnemies(parsed.customEnemies);
     setCustomEnemyRegistry(customEnemies);
     customModes = sanitizeCustomModes(parsed.customModes);
+    customMaps = sanitizeCustomMaps(parsed.customMaps);
     cacheProgressLocally(progress);
     cacheCustomEnemiesLocally(customEnemies);
     cacheCustomModesLocally(customModes);
+    cacheCustomMapsLocally(customMaps);
     const written = await replaceDiskSave(currentSaveBundle());
     game.setAvailableTowers(progress.unlockedTowers);
     selectedMode = NORMAL_MODE;
+    selectedMap = MAP_DEFINITIONS.sector07;
     renderMeta();
     renderModeList();
+    renderMapLibrary();
     setSaveStatus(
       written ? "Backup imported into the disk save." : "Backup imported into browser fallback storage.",
       written ? "good" : "danger",
@@ -1665,6 +2346,13 @@ query<HTMLInputElement>("#mode-import-input").addEventListener("change", async (
   const file = input.files?.[0];
   input.value = "";
   if (file) await importModeFromFile(file);
+});
+
+query<HTMLInputElement>("#map-import-input").addEventListener("change", async (event) => {
+  const input = event.currentTarget as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = "";
+  if (file) await importMapFromFile(file);
 });
 
 window.addEventListener("keydown", (event) => {

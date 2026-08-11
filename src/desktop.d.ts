@@ -19,7 +19,7 @@ interface MonochromiumDesktopBridge {
     data: import("./game/persistence.ts").SaveBundle | null;
   }>;
   replaceSave(bundle: import("./game/persistence.ts").SaveBundle): Promise<boolean>;
-  saveSection(section: "meta" | "custom-modes" | "custom-enemies", value: unknown): Promise<boolean>;
+  saveSection(section: "meta" | "custom-modes" | "custom-enemies" | "custom-maps", value: unknown): Promise<boolean>;
   getEnvironment(): Promise<MonochromiumDesktopEnvironment>;
   getUpdateState(): Promise<MonochromiumUpdateState>;
   checkForUpdate(): Promise<MonochromiumUpdateState>;

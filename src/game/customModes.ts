@@ -156,7 +156,10 @@ export const customModeToDefinition = (draft: CustomModeDraft): ModeDefinition =
   const waves = draft.waves.map((wave) => {
     const blocks: EnemyGroupWaveBlock[] = wave.blocks.map((block) => ({ ...block }));
     const referenceHealth = blocks.reduce(
-      (total, block) => total + getEnemyDefinition(block.enemy).hp * block.count,
+      (total, block) => {
+        const enemy = getEnemyDefinition(block.enemy);
+        return total + (enemy.hp + enemy.shieldHp) * block.count;
+      },
       0,
     );
     return {

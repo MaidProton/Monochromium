@@ -12,6 +12,7 @@ export interface CustomEnemyDraft {
   color: string;
   sides: number;
   hp: number;
+  shieldHp: number;
   speed: number;
   damage: number;
   attackInterval: number;
@@ -64,6 +65,7 @@ export const createCustomEnemy = (): CustomEnemyDraft => ({
   color: "#d46cff",
   sides: 5,
   hp: 100,
+  shieldHp: 0,
   speed: 36,
   damage: 8,
   attackInterval: 1.8,
@@ -99,6 +101,7 @@ const sanitizeEnemy = (value: unknown): CustomEnemyDraft | null => {
     color: color(source.color),
     sides: integer(source.sides, 5, 3, 12),
     hp: integer(source.hp, 100, 1, 10_000_000),
+    shieldHp: integer(source.shieldHp, 0, 0, 10_000_000),
     speed: rangedNumber(source.speed, 36, 1, 500),
     damage: integer(source.damage, 8, 0, 1_000_000),
     attackInterval: rangedNumber(source.attackInterval, 1.8, 0.1, 120),
@@ -183,6 +186,7 @@ export const customEnemyToDefinition = (draft: CustomEnemyDraft): EnemyDefinitio
   kind: draft.id,
   name: draft.name,
   hp: draft.hp,
+  shieldHp: draft.shieldHp,
   speed: draft.speed,
   damage: draft.damage,
   attackInterval: draft.attackInterval,

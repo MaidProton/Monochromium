@@ -76,8 +76,12 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 - **Export Save** downloads a portable JSON backup; **Import Save** validates and restores one. Importing also updates the on-disk save when the launcher service is active.
 - The Enemy List can export one custom enemy or a selected bulk bundle as JSON, and import those bundles later. The Mode List exports one custom mode per JSON file and can import it on another installation.
 - Imported modes preserve their custom-enemy references. A mode that references an unavailable custom enemy is visibly locked and cannot start until that enemy is imported; deleting an enemy leaves dependent modes locked instead of silently replacing the enemy.
+- The Creator Hub groups the Mode, Enemy, and Map creators behind one main-menu entry.
+- The Map Creator provides a live 1600×700 route editor with draggable edge terminals, route points, palette presets, rectangular no-build zones, undo/redo, validation, and rewardless unsaved playtests. Custom maps export and import one map per JSON file.
+- Runs on custom maps are sandboxed: they never award profile currency, victories, run totals, or official map clears.
 - Creator waves are block-based. Enemy Group blocks choose an enemy, amount, spawn delay, and time until the next block starts; each group's spawning continues asynchronously when later blocks begin.
-- The Enemy Creator separates read-only official enemies from editable local enemies. A custom enemy can use a 3-12 sided polygon, any color/name, custom HP, speed, tower damage, attack timing, telegraph timing, core damage, body radius, Hidden status, and an optional boss healthbar.
+- The Enemy Creator separates read-only official enemies from editable local enemies. A custom enemy can use a 3-12 sided polygon, any color/name, custom HP, shield HP, speed, tower damage, attack timing, telegraph timing, core damage, body radius, Hidden status, and an optional boss healthbar.
+- Shield HP is a separate yellow damage buffer. Damage removes shield first, excess damage is discarded instead of bleeding into HP, and shield damage does not award hitcash.
 - Custom enemies can summon a selectable mix of official and custom enemies on a configurable cooldown, stun nearby towers with configurable shockwaves, or combine both abilities. Once saved, they are available in every custom Mode Creator enemy-group block.
 - A new profile begins with Bandit only. Winning Normal Mode awards the full map-adjusted reward; a loss awards Coins based on the wave reached.
 - Three maps are available: the long and forgiving Sector 07-A, shorter Ashen Switchback, and shortest low-overlap Null Overpass.
@@ -106,11 +110,11 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 
 All editable gameplay definitions are grouped in [`src/game/config.ts`](src/game/config.ts):
 
-- `ENEMY_DEFINITIONS` gives every enemy its own name, base HP, speed, tower damage, attack/telegraph timing, core damage, radius, and assigned sprite colors/shape/glyph.
+- `ENEMY_DEFINITIONS` gives every enemy its own name, base HP, shield HP, speed, tower damage, attack/telegraph timing, core damage, radius, and assigned sprite colors/shape/glyph.
 - `ECONOMY_RULES` contains hitcash, wave stipend, relocation cost, and casualty-refund tuning.
 - `COMBAT_RULES` contains the shared counter window and successful-counter cooldown.
 - `TOWER_DEFINITIONS` contains every tower's price, copy limit, forms, level stats, counter signature, active ability, and upgrade costs/skills.
-- `MAP_DEFINITIONS` contains map paths, core positions, palettes, descriptions, and reward multipliers.
+- `MAP_DEFINITIONS` contains immutable official maps. Custom-map validation, conversion, and persistence live in `src/game/customMaps.ts`, while shared battlefield/editor drawing lives in `src/game/mapRendering.ts`.
 - `NORMAL_MODE` contains starting resources, rewards, and the exact 25 finite wave definitions. Future finite modes belong in `MODE_DEFINITIONS`.
 
 Persistent profile handling is isolated in [`src/game/meta.ts`](src/game/meta.ts). The in-game **DBG** panel (or **F1**) can toggle infinite cash, add cash, heal the core, clear the current wave, restore stock, max the selected tower, or permanently unlock every tower. Infinite cash makes deployments, upgrades, and relocations free without replacing the visible balance values in the config.

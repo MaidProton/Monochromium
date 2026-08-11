@@ -30,7 +30,9 @@ export type OfficialEnemyKind =
 export type CustomEnemyKind = `custom-enemy:${string}`;
 export type EnemyKind = OfficialEnemyKind | CustomEnemyKind;
 export type ModeKind = "normal" | `custom:${string}`;
-export type MapKind = "sector07" | "switchback" | "overpass";
+export type OfficialMapKind = "sector07" | "switchback" | "overpass";
+export type CustomMapKind = `custom-map:${string}`;
+export type MapKind = OfficialMapKind | CustomMapKind;
 export type TargetingMode = "first" | "last" | "strongest" | "weakest" | "closest";
 
 export type EnemySpriteShape = "circle" | "square" | "diamond" | "hexagon" | "polygon";
@@ -39,6 +41,8 @@ export interface EnemyDefinition {
   readonly kind: EnemyKind;
   readonly name: string;
   readonly hp: number;
+  /** A separate damage buffer that does not award hitcash or spill into HP. */
+  readonly shieldHp: number;
   readonly speed: number;
   readonly damage: number;
   readonly attackInterval: number;
@@ -164,6 +168,8 @@ export interface Enemy {
   pathDistance: number;
   hp: number;
   readonly maxHp: number;
+  shieldHp: number;
+  readonly maxShieldHp: number;
   readonly speed: number;
   readonly damage: number;
   readonly attackInterval: number;
@@ -266,6 +272,7 @@ export interface MapDefinition {
   readonly kind: MapKind;
   readonly name: string;
   readonly index: number;
+  readonly isCustom: boolean;
   readonly difficulty: "Easy" | "Medium" | "Hard";
   readonly description: string;
   readonly rewardMultiplier: number;
@@ -273,12 +280,21 @@ export interface MapDefinition {
   readonly core: Point;
   readonly entryLabel: Point;
   readonly pathLabel: Point;
+  readonly blockedZones: readonly BlockedZone[];
   readonly palette: {
     readonly field: string;
     readonly glow: string;
     readonly path: string;
     readonly accent: string;
   };
+}
+
+export interface BlockedZone {
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 export interface PlacementPreview {

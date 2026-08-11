@@ -46,7 +46,7 @@ def wait_until_ready(url: str, process: subprocess.Popen[bytes]) -> None:
 
 
 def fresh_save() -> dict[str, Any]:
-    return {"version": 1, "meta": None, "customModes": [], "customEnemies": []}
+    return {"version": 1, "meta": None, "customModes": [], "customEnemies": [], "customMaps": []}
 
 
 def read_save() -> tuple[bool, dict[str, Any]]:
@@ -62,6 +62,7 @@ def read_save() -> tuple[bool, dict[str, Any]]:
                 "meta": parsed.get("meta"),
                 "customModes": parsed.get("customModes", []),
                 "customEnemies": parsed.get("customEnemies", []),
+                "customMaps": parsed.get("customMaps", []),
             }
         except (OSError, ValueError, json.JSONDecodeError):
             return False, fresh_save()
@@ -73,6 +74,7 @@ def write_save(payload: dict[str, Any]) -> None:
         "meta": payload.get("meta"),
         "customModes": payload.get("customModes", []),
         "customEnemies": payload.get("customEnemies", []),
+        "customMaps": payload.get("customMaps", []),
     }
     SAVE_DIRECTORY.mkdir(parents=True, exist_ok=True)
     temporary = SAVE_DIRECTORY / "monochromium_save.tmp.json"
@@ -143,8 +145,8 @@ def make_save_handler(allowed_origin: str) -> type[BaseHTTPRequestHandler]:
                     if not isinstance(incoming, dict):
                         raise ValueError("Save bundle must be an object")
                     write_save(incoming)
-                elif self.path in ("/api/save/meta", "/api/save/custom-modes", "/api/save/custom-enemies"):
-                    key = "meta" if self.path.endswith("/meta") else "customEnemies" if self.path.endswith("/custom-enemies") else "customModes"
+                elif self.path in ("/api/save/meta", "/api/save/custom-modes", "/api/save/custom-enemies", "/api/save/custom-maps"):
+                    key = "meta" if self.path.endswith("/meta") else "customEnemies" if self.path.endswith("/custom-enemies") else "customMaps" if self.path.endswith("/custom-maps") else "customModes"
                     write_save_section(key, incoming)
                 else:
                     self._json({"error": "Not found"}, 404)
