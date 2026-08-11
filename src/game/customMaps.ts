@@ -122,7 +122,6 @@ const rectDistanceToPoint = (zone: BlockedZone, point: Point): number => {
 
 export const validateCustomMap = (draft: CustomMapDraft): MapValidationResult => {
   const errors: string[] = [];
-  if (draft.entryEdge === draft.exitEdge) errors.push("Entry and exit must use different map edges.");
   if (draft.path.length < 2 || draft.path.length > 32) errors.push("Routes require 2 to 32 points.");
   const segments = draft.path.slice(0, -1).map((point, index) => ({ a: point, b: draft.path[index + 1]! }));
   segments.forEach((segment, index) => {
@@ -175,8 +174,7 @@ const sanitizeMap = (value: unknown): CustomMapDraft | null => {
   const source = value as Partial<CustomMapDraft>;
   const fallback = createCustomMap();
   const entryEdge = safeEdge(source.entryEdge, "left");
-  let exitEdge = safeEdge(source.exitEdge, "right");
-  if (entryEdge === exitEdge) exitEdge = entryEdge === "right" ? "left" : "right";
+  const exitEdge = safeEdge(source.exitEdge, "right");
   const sourcePath = Array.isArray(source.path) ? source.path.slice(0, 32) : fallback.path;
   const path = sourcePath.map((point, index) => sanitizePoint(point, fallback.path[index] ?? { x: 800, y: 350 }));
   if (path.length < 2) return null;
