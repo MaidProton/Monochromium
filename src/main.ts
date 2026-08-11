@@ -156,7 +156,7 @@ app.innerHTML = `
       <small class="save-notice" id="save-status">Checking disk save service…</small>
       <section class="update-panel" id="update-panel" hidden aria-live="polite">
         <div><span>SYSTEM UPDATE</span><strong id="update-status">Updater unavailable</strong></div>
-        <div class="update-actions"><button class="secondary-button" data-action="check-update" id="check-update-button">CHECK</button><button class="primary-button" data-action="install-update" id="install-update-button" hidden>RESTART &amp; INSTALL</button></div>
+        <div class="update-actions"><button class="secondary-button" data-action="check-update" id="check-update-button">CHECK</button><button class="secondary-button" data-action="download-update" id="download-update-button" hidden>DOWNLOAD UPDATE</button><button class="primary-button" data-action="install-update" id="install-update-button" hidden>RESTART &amp; INSTALL</button></div>
       </section>
       </div>
 
@@ -539,6 +539,7 @@ const debugPanel = query<HTMLElement>("#debug-panel");
 const updatePanel = query<HTMLElement>("#update-panel");
 const updateStatus = query<HTMLElement>("#update-status");
 const checkUpdateButton = query<HTMLButtonElement>("#check-update-button");
+const downloadUpdateButton = query<HTMLButtonElement>("#download-update-button");
 const installUpdateButton = query<HTMLButtonElement>("#install-update-button");
 let stopUpdateStateSubscription: (() => void) | null = null;
 let selectionSignature = "";
@@ -675,6 +676,7 @@ const renderUpdateState = (state: MonochromiumUpdateState): void => {
   updateStatus.textContent = state.message;
   updateStatus.dataset["status"] = state.status;
   checkUpdateButton.disabled = ["checking", "downloading"].includes(state.status);
+  downloadUpdateButton.hidden = state.status !== "available";
   installUpdateButton.hidden = state.status !== "downloaded";
   if (state.status === "downloaded") updateStatus.classList.add("ready");
   else updateStatus.classList.remove("ready");
@@ -683,6 +685,16 @@ const renderUpdateState = (state: MonochromiumUpdateState): void => {
 const checkForUpdate = async (): Promise<void> => {
   if (!window.monochromiumDesktop) return;
   renderUpdateState(await window.monochromiumDesktop.checkForUpdate());
+};
+
+const downloadUpdate = async (): Promise<void> => {
+  if (!window.monochromiumDesktop || !window.confirm("Download this update now? The game will not install it until you confirm again.")) return;
+  renderUpdateState(await window.monochromiumDesktop.downloadUpdate());
+};
+
+const installUpdate = async (): Promise<void> => {
+  if (!window.monochromiumDesktop || !window.confirm("Restart Monochromium and install the downloaded update?")) return;
+  await window.monochromiumDesktop.installUpdate();
 };
 
 const hydrateUpdater = async (): Promise<void> => {
@@ -1800,8 +1812,11 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "check-update":
       void checkForUpdate();
       break;
+    case "download-update":
+      void downloadUpdate();
+      break;
     case "install-update":
-      void window.monochromiumDesktop?.installUpdate();
+      void installUpdate();
       break;
     case "back-main":
       showFrontScreen("main");

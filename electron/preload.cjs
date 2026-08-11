@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("monochromiumDesktop", Object.freeze({
   getEnvironment: () => ipcRenderer.invoke("desktop:environment"),
   getUpdateState: () => ipcRenderer.invoke("updater:state"),
   checkForUpdate: () => ipcRenderer.invoke("updater:check"),
+  downloadUpdate: () => ipcRenderer.invoke("updater:download"),
   installUpdate: () => ipcRenderer.invoke("updater:install"),
   onUpdateState: (listener) => {
     const handler = (_event, state) => listener(state);

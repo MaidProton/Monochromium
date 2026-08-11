@@ -1,4 +1,4 @@
-import { PATH_HALF_WIDTH, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
+import { WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import { saveDiskSection } from "./persistence.ts";
 import type { BlockedZone, CustomMapKind, MapDefinition, Point } from "./types.ts";
@@ -111,58 +111,8 @@ export const createCustomMap = (): CustomMapDraft => ({
   updatedAt: Date.now(),
 });
 
-const pointToSegmentDistance = (point: Point, a: Point, b: Point): number => {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const lengthSquared = dx * dx + dy * dy;
-  if (lengthSquared === 0) return distance(point, a);
-  const amount = clamp(((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared, 0, 1);
-  return distance(point, { x: a.x + dx * amount, y: a.y + dy * amount });
-};
-
-const orientation = (a: Point, b: Point, c: Point): number =>
-  (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-
-const segmentsIntersect = (a: Point, b: Point, c: Point, d: Point): boolean => {
-  const abC = orientation(a, b, c);
-  const abD = orientation(a, b, d);
-  const cdA = orientation(c, d, a);
-  const cdB = orientation(c, d, b);
-  if (((abC > 0 && abD < 0) || (abC < 0 && abD > 0)) && ((cdA > 0 && cdB < 0) || (cdA < 0 && cdB > 0))) return true;
-  const epsilon = 0.001;
-  return (Math.abs(abC) < epsilon && pointToSegmentDistance(c, a, b) < epsilon)
-    || (Math.abs(abD) < epsilon && pointToSegmentDistance(d, a, b) < epsilon)
-    || (Math.abs(cdA) < epsilon && pointToSegmentDistance(a, c, d) < epsilon)
-    || (Math.abs(cdB) < epsilon && pointToSegmentDistance(b, c, d) < epsilon);
-};
-
-const segmentDistance = (a: Point, b: Point, c: Point, d: Point): number => {
-  if (segmentsIntersect(a, b, c, d)) return 0;
-  return Math.min(
-    pointToSegmentDistance(a, c, d),
-    pointToSegmentDistance(b, c, d),
-    pointToSegmentDistance(c, a, b),
-    pointToSegmentDistance(d, a, b),
-  );
-};
-
 const rectsOverlap = (a: BlockedZone, b: BlockedZone): boolean =>
   a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
-
-const pointInRect = (point: Point, zone: BlockedZone): boolean =>
-  point.x >= zone.x && point.x <= zone.x + zone.width && point.y >= zone.y && point.y <= zone.y + zone.height;
-
-const segmentIntersectsRect = (a: Point, b: Point, zone: BlockedZone): boolean => {
-  if (pointInRect(a, zone) || pointInRect(b, zone)) return true;
-  const topLeft = { x: zone.x, y: zone.y };
-  const topRight = { x: zone.x + zone.width, y: zone.y };
-  const bottomRight = { x: zone.x + zone.width, y: zone.y + zone.height };
-  const bottomLeft = { x: zone.x, y: zone.y + zone.height };
-  return segmentsIntersect(a, b, topLeft, topRight)
-    || segmentsIntersect(a, b, topRight, bottomRight)
-    || segmentsIntersect(a, b, bottomRight, bottomLeft)
-    || segmentsIntersect(a, b, bottomLeft, topLeft);
-};
 
 const rectDistanceToPoint = (zone: BlockedZone, point: Point): number => {
   const dx = Math.max(zone.x - point.x, 0, point.x - (zone.x + zone.width));
@@ -181,17 +131,6 @@ export const validateCustomMap = (draft: CustomMapDraft): MapValidationResult =>
   let pathLength = 0;
   segments.forEach((segment) => { pathLength += distance(segment.a, segment.b); });
   if (pathLength < 1500) errors.push("The complete route must be at least 1,500 units long.");
-  for (let first = 0; first < segments.length; first += 1) {
-    for (let second = first + 2; second < segments.length; second += 1) {
-      const a = segments[first];
-      const b = segments[second];
-      if (!a || !b) continue;
-      const separation = segmentDistance(a.a, a.b, b.a, b.b);
-      if (separation === 0) errors.push(`Route segments ${first + 1} and ${second + 1} intersect.`);
-      else if (separation < PATH_HALF_WIDTH * 2 + 20) errors.push(`Route segments ${first + 1} and ${second + 1} are too close together.`);
-    }
-  }
-
   let core = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
   if (segments.length > 0 && pathLength > 0) core = new Polyline(draft.path).sample(pathLength - 110).point;
   if (draft.blockedZones.length > 24) errors.push("Maps may contain at most 24 blocked zones.");
@@ -199,16 +138,6 @@ export const validateCustomMap = (draft: CustomMapDraft): MapValidationResult =>
     if (zone.width < 80 || zone.height < 80) errors.push(`Blocked zone ${index + 1} must be at least 80 by 80 units.`);
     if (zone.x < 0 || zone.y < 0 || zone.x + zone.width > WORLD_WIDTH || zone.y + zone.height > WORLD_HEIGHT) {
       errors.push(`Blocked zone ${index + 1} must remain inside the battlefield.`);
-    }
-    const expanded = {
-      ...zone,
-      x: zone.x - PATH_HALF_WIDTH - 20,
-      y: zone.y - PATH_HALF_WIDTH - 20,
-      width: zone.width + (PATH_HALF_WIDTH + 20) * 2,
-      height: zone.height + (PATH_HALF_WIDTH + 20) * 2,
-    };
-    if (segments.some((segment) => segmentIntersectsRect(segment.a, segment.b, expanded))) {
-      errors.push(`Blocked zone ${index + 1} is too close to the route.`);
     }
     if (rectDistanceToPoint(zone, core) < 75) errors.push(`Blocked zone ${index + 1} is too close to the core.`);
     for (let other = index + 1; other < draft.blockedZones.length; other += 1) {

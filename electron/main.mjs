@@ -24,6 +24,7 @@ const updateState = {
 let mainWindow = null;
 let updaterReady = false;
 let updateCheckPromise = null;
+let updateDownloadPromise = null;
 
 const publishUpdateState = (nextState) => {
   Object.assign(updateState, nextState);
@@ -31,28 +32,64 @@ const publishUpdateState = (nextState) => {
 };
 
 const updateFeedUrl = () => updateFeedTemplate.replaceAll("{version}", app.getVersion());
+const updateReleaseFileUrl = () => `${updateFeedUrl()}/RELEASES?id=monochromium&localVersion=${encodeURIComponent(app.getVersion())}&arch=${process.arch === "x64" ? "amd64" : process.arch}`;
+const versionParts = (value) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
+const compareVersions = (left, right) => {
+  const a = versionParts(left);
+  const b = versionParts(right);
+  for (let index = 0; index < 3; index += 1) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) - (b[index] ?? 0);
+  }
+  return 0;
+};
 
-const updaterProcessIsActive = () => updateCheckPromise !== null || ["checking", "downloading"].includes(updateState.status);
+const updaterProcessIsActive = () => updateCheckPromise !== null || updateDownloadPromise !== null;
 
-const checkForUpdates = async () => {
+const inspectForUpdates = async () => {
   if (!updaterReady || updaterProcessIsActive()) return;
   publishUpdateState({ status: "checking", message: "Checking for a newer release…" });
-  updateCheckPromise = autoUpdater.checkForUpdates()
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      if (message.includes("already running")) {
-        publishUpdateState({
-          status: "downloading",
-          message: "An update is already being downloaded // please wait or restart the game.",
-        });
+  updateCheckPromise = fetch(updateReleaseFileUrl())
+    .then(async (response) => {
+      if (!response.ok) throw new Error(`Update service returned HTTP ${response.status}.`);
+      const releases = await response.text();
+      const versions = [...releases.matchAll(/monochromium-(\d+\.\d+\.\d+)-(?:full|delta)\.nupkg/gi)]
+        .map((match) => match[1])
+        .filter((version) => version !== undefined);
+      const latestVersion = versions.reduce((latest, version) => {
+        if (!latest || compareVersions(version, latest) > 0) return version;
+        return latest;
+      }, null);
+      if (!latestVersion || compareVersions(latestVersion, app.getVersion()) <= 0) {
+        publishUpdateState({ status: "not-available", message: `Version ${app.getVersion()} is current.` });
         return;
       }
+      publishUpdateState({
+        status: "available",
+        message: `Version ${latestVersion} available // download requires approval.`,
+      });
+    })
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
       publishUpdateState({ status: "error", message: `Update check failed // ${message}` });
     })
     .finally(() => {
       updateCheckPromise = null;
     });
   await updateCheckPromise;
+};
+
+const downloadUpdate = async () => {
+  if (!updaterReady || updateState.status !== "available" || updaterProcessIsActive()) return;
+  publishUpdateState({ status: "downloading", message: "Downloading update // please keep the game open…" });
+  updateDownloadPromise = autoUpdater.checkForUpdates()
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      publishUpdateState({ status: "error", message: `Update download failed // ${message}` });
+    })
+    .finally(() => {
+      updateDownloadPromise = null;
+    });
+  await updateDownloadPromise;
 };
 
 const setupUpdater = () => {
@@ -66,25 +103,18 @@ const setupUpdater = () => {
     return;
   }
 
-  autoUpdater.on("checking-for-update", () => publishUpdateState({ status: "checking", message: "Checking for a newer release…" }));
-  autoUpdater.on("update-available", () => publishUpdateState({ status: "downloading", message: "Update found // downloading in the background…" }));
-  autoUpdater.on("update-not-available", () => publishUpdateState({ status: "not-available", message: `Version ${app.getVersion()} is current.` }));
+  autoUpdater.on("checking-for-update", () => publishUpdateState({ status: "downloading", message: "Starting approved update download…" }));
+  autoUpdater.on("update-available", () => publishUpdateState({ status: "downloading", message: "Update approved // downloading…" }));
+  autoUpdater.on("update-not-available", () => publishUpdateState({ status: "error", message: "The approved update was not available." }));
   autoUpdater.on("update-downloaded", () => publishUpdateState({ status: "downloaded", message: "Update ready // restart to install it." }));
   autoUpdater.on("error", (error) => {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes("already running")) {
-      publishUpdateState({
-        status: "downloading",
-        message: "An update is already being downloaded // please wait or restart the game.",
-      });
-      return;
-    }
-    publishUpdateState({ status: "error", message: `Update check failed // ${message}` });
+    publishUpdateState({ status: "error", message: `Update download failed // ${message}` });
   });
 
   // Squirrel holds a lock during first-run setup. Delay the first check so a
   // newly installed copy does not report a misleading updater error.
-  setTimeout(() => void checkForUpdates(), 10_000);
+  setTimeout(() => void inspectForUpdates(), 10_000);
 };
 
 app.setName("Monochromium");
@@ -217,7 +247,13 @@ ipcMain.handle("updater:state", () => ({ ...updateState }));
 
 ipcMain.handle("updater:check", async () => {
   if (!updaterReady) return { ...updateState };
-  await checkForUpdates();
+  await inspectForUpdates();
+  return { ...updateState };
+});
+
+ipcMain.handle("updater:download", async () => {
+  if (!updaterReady) return { ...updateState };
+  await downloadUpdate();
   return { ...updateState };
 });
 

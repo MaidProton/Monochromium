@@ -4,7 +4,7 @@ interface MonochromiumDesktopEnvironment {
   readonly savePath: string;
 }
 
-type MonochromiumUpdateStatus = "disabled" | "idle" | "checking" | "downloading" | "downloaded" | "not-available" | "error";
+type MonochromiumUpdateStatus = "disabled" | "idle" | "checking" | "available" | "downloading" | "downloaded" | "not-available" | "error";
 
 interface MonochromiumUpdateState {
   readonly status: MonochromiumUpdateStatus;
@@ -23,6 +23,7 @@ interface MonochromiumDesktopBridge {
   getEnvironment(): Promise<MonochromiumDesktopEnvironment>;
   getUpdateState(): Promise<MonochromiumUpdateState>;
   checkForUpdate(): Promise<MonochromiumUpdateState>;
+  downloadUpdate(): Promise<MonochromiumUpdateState>;
   installUpdate(): Promise<boolean>;
   onUpdateState(listener: (state: MonochromiumUpdateState) => void): () => void;
 }
