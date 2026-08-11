@@ -7,6 +7,7 @@ import { configuredUpdateValue, updateConfig } from "./update-config.mjs";
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(moduleDirectory, "..");
+const towerConfigPath = path.join(projectDirectory, "src", "game", "config.ts");
 const maximumSaveBytes = 16 * 1024 * 1024;
 const saveSections = new Map([
   ["meta", "meta"],
@@ -32,6 +33,56 @@ const publishUpdateState = (nextState) => {
 };
 
 const updateFeedUrl = () => updateFeedTemplate.replaceAll("{version}", app.getVersion());
+
+const findTowerDefinitionBlock = (source, kind) => {
+  const marker = `  ${kind}: {`;
+  const start = source.indexOf(marker, source.indexOf("export const TOWER_DEFINITIONS"));
+  if (start < 0) throw new Error(`Could not find tower definition: ${kind}`);
+  const openingBrace = source.indexOf("{", start);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = openingBrace; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (lineComment) {
+      if (character === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (character === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      lineComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (character === "\"" || character === "'" || character === "`") {
+      quote = character;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}" && --depth === 0) return { start, end: index };
+  }
+  throw new Error(`Could not parse tower definition: ${kind}`);
+};
 const updateReleaseFileUrl = () => `${updateFeedUrl()}/RELEASES?id=monochromium&localVersion=${encodeURIComponent(app.getVersion())}&arch=${process.arch === "x64" ? "amd64" : process.arch}`;
 const versionParts = (value) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
 const compareVersions = (left, right) => {
@@ -242,6 +293,17 @@ ipcMain.handle("desktop:environment", () => ({
   version: app.getVersion(),
   savePath: savePaths().save,
 }));
+
+ipcMain.handle("balance:save-tower", async (_event, kind, definition) => {
+  if (app.isPackaged) throw new Error("The Tower Balance Lab is available only in development builds.");
+  if (typeof kind !== "string" || !/^[a-z]+$/.test(kind)) throw new Error("Invalid tower kind.");
+  if (!definition || typeof definition !== "object" || Array.isArray(definition)) throw new Error("Invalid tower definition.");
+  const source = await readFile(towerConfigPath, "utf8");
+  const block = findTowerDefinitionBlock(source, kind);
+  const formatted = `  ${kind}: ${JSON.stringify(definition, null, 2).replaceAll("\n", "\n  ")}`;
+  await writeFile(towerConfigPath, `${source.slice(0, block.start)}${formatted}${source.slice(block.end + 1)}`, "utf8");
+  return { ok: true, path: towerConfigPath };
+});
 
 ipcMain.handle("updater:state", () => ({ ...updateState }));
 

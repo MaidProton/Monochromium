@@ -54,7 +54,7 @@ import { createMapPathShape, drawBlockedZone, drawMapCore, drawMapField, drawMap
 import { clamp, distance, Polyline } from "./game/math.ts";
 import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, unlockEveryTower, unlockTower } from "./game/meta.ts";
 import { getDesktopEnvironment, hasDiskSaveApi, loadDiskSave, replaceDiskSave, type SaveBundle } from "./game/persistence.ts";
-import type { BlockedZone, MapDefinition, MapKind, ModeDefinition, Point, TargetingMode, TowerKind } from "./game/types.ts";
+import type { BlockedZone, MapDefinition, MapKind, ModeDefinition, Point, TargetingMode, TowerDefinition, TowerKind } from "./game/types.ts";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) throw new Error("Missing app root");
@@ -132,7 +132,16 @@ app.innerHTML = `
           <button data-action="debug-stock"><span>RESTORE STOCK</span><b>ALL TOWERS</b></button>
           <button data-action="debug-max"><span>MAX SELECTED</span><b>FREE</b></button>
           <button data-action="debug-unlock"><span>UNLOCK TOWERS</span><b>PERMANENT</b></button>
+          <button data-action="debug-balance" id="debug-balance-button" hidden><span>TOWER BALANCE LAB</span><b>LIVE + SAVE TO CONFIG</b></button>
         </div>
+        <section class="balance-lab" id="balance-lab" hidden>
+          <div class="balance-lab-head"><div><span>TOWER BALANCE LAB</span><small>DEVELOPMENT ONLY // CHANGES APPLY LIVE</small></div><button data-action="debug-balance-close" aria-label="Close tower balance lab">×</button></div>
+          <label class="balance-tower-select"><span>TOWER</span><select id="balance-tower-kind">${TOWER_ORDER.map((kind) => `<option value="${kind}">${TOWER_DEFINITIONS[kind].name.toUpperCase()}</option>`).join("")}</select></label>
+          <p class="balance-lab-note">Edit numeric combat, deployment, level, upgrade, and ability values. Input changes apply to the current dev run immediately. SAVE TO CONFIG writes them into <code>src/game/config.ts</code>.</p>
+          <div class="balance-fields" id="balance-fields"></div>
+          <div class="balance-lab-actions"><button class="secondary-button" data-action="debug-balance-reset">RESET FORM</button><button class="primary-button" data-action="debug-balance-save">SAVE TO CONFIG</button></div>
+          <small class="balance-lab-status" id="balance-lab-status"></small>
+        </section>
       </aside>
 
       <div class="menu-screen main-menu" id="main-menu">
@@ -536,12 +545,20 @@ const battleLog = query<HTMLElement>("#battle-log");
 const towerInspector = query<HTMLElement>("#tower-inspector");
 const selectedPill = query<HTMLButtonElement>("#selected-pill");
 const debugPanel = query<HTMLElement>("#debug-panel");
+const debugBalanceButton = query<HTMLButtonElement>("#debug-balance-button");
+const balanceLab = query<HTMLElement>("#balance-lab");
+const balanceTowerKind = query<HTMLSelectElement>("#balance-tower-kind");
+const balanceFields = query<HTMLDivElement>("#balance-fields");
+const balanceLabStatus = query<HTMLElement>("#balance-lab-status");
 const updatePanel = query<HTMLElement>("#update-panel");
 const updateStatus = query<HTMLElement>("#update-status");
 const checkUpdateButton = query<HTMLButtonElement>("#check-update-button");
 const downloadUpdateButton = query<HTMLButtonElement>("#download-update-button");
 const installUpdateButton = query<HTMLButtonElement>("#install-update-button");
 let stopUpdateStateSubscription: (() => void) | null = null;
+let developmentBuild = false;
+let balanceKind: TowerKind = TOWER_ORDER[0] ?? "bandit";
+let balanceDraft: TowerDefinition | null = null;
 let selectionSignature = "";
 let inspectorSuppressed = false;
 let lastSelectedTowerId: number | null = null;
@@ -682,6 +699,88 @@ const renderUpdateState = (state: MonochromiumUpdateState): void => {
   else updateStatus.classList.remove("ready");
 };
 
+const cloneTowerDefinition = (kind: TowerKind): TowerDefinition =>
+  JSON.parse(JSON.stringify(TOWER_DEFINITIONS[kind])) as TowerDefinition;
+
+const balanceValueAtPath = (path: string): number => {
+  let current: unknown = balanceDraft;
+  for (const part of path.split(".")) {
+    if (!current || typeof current !== "object") return 0;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return typeof current === "number" && Number.isFinite(current) ? current : 0;
+};
+
+const setBalanceValueAtPath = (path: string, value: number): void => {
+  if (!balanceDraft) return;
+  const parts = path.split(".");
+  let current = balanceDraft as unknown as Record<string, unknown>;
+  parts.slice(0, -1).forEach((part) => {
+    const next = current[part];
+    if (!next || typeof next !== "object") return;
+    current = next as Record<string, unknown>;
+  });
+  const finalPart = parts[parts.length - 1];
+  if (finalPart) current[finalPart] = value;
+};
+
+const balanceFieldLabel = (path: string): string => path
+  .replace(/^onPath\./, "PATH // ")
+  .replace(/^levels\.(\d+)\./, (_match, level) => "LEVEL " + (Number(level) + 1) + " // ")
+  .replace(/^upgrades\.(\d+)\./, (_match, level) => "UPGRADE " + (Number(level) + 1) + " // ")
+  .replace(/^ability\./, "ABILITY // ")
+  .replace(/([a-z])([A-Z])/g, "$1 $2")
+  .replaceAll(".", " // ")
+  .toUpperCase();
+
+const balanceFieldStep = (path: string): string =>
+  /fireRate|reload|hpMultiplier/.test(path) ? "0.01" : "1";
+
+const renderBalanceLab = (): void => {
+  if (!balanceDraft) balanceDraft = cloneTowerDefinition(balanceKind);
+  balanceTowerKind.value = balanceKind;
+  const paths: string[] = ["cost", "unlockCost", "copyLimit"];
+  if (balanceDraft.hiddenDetectionLevel !== undefined) paths.push("hiddenDetectionLevel");
+  paths.push("onPath.hp", "onPath.maxAggro");
+  const levelKeys = [...new Set(balanceDraft.levels.flatMap((level) => Object.entries(level)
+    .filter(([, value]) => typeof value === "number")
+    .map(([key]) => key)))];
+  balanceDraft.levels.forEach((_level, index) => levelKeys.forEach((key) => paths.push("levels." + index + "." + key)));
+  balanceDraft.upgrades.forEach((_upgrade, index) => paths.push("upgrades." + index + ".cost"));
+  if (balanceDraft.ability) {
+    Object.entries(balanceDraft.ability)
+      .filter(([, value]) => typeof value === "number")
+      .forEach(([key]) => paths.push("ability." + key));
+  }
+  balanceFields.innerHTML = paths.map((path) => "<label class=\"balance-field\"><span>" + balanceFieldLabel(path) + "</span><input type=\"number\" min=\"0\" step=\"" + balanceFieldStep(path) + "\" data-balance-path=\"" + path + "\" value=\"" + balanceValueAtPath(path) + "\"></label>").join("");
+};
+
+const applyBalanceDraft = (): void => {
+  if (!balanceDraft) return;
+  const runtime = TOWER_DEFINITIONS[balanceKind] as unknown as Record<string, unknown>;
+  const source = balanceDraft as unknown as Record<string, unknown>;
+  Object.keys(source).forEach((key) => { runtime[key] = JSON.parse(JSON.stringify(source[key])); });
+  game.applyDebugTowerBalance(balanceKind);
+};
+
+const openBalanceLab = (): void => {
+  if (!developmentBuild) return;
+  balanceDraft = cloneTowerDefinition(balanceKind);
+  balanceLab.hidden = false;
+  renderBalanceLab();
+};
+
+const saveBalanceToConfig = async (): Promise<void> => {
+  if (!developmentBuild || !balanceDraft || !window.monochromiumDesktop) return;
+  balanceLabStatus.textContent = "SAVING TO SRC/GAME/CONFIG.TS…";
+  try {
+    const result = await window.monochromiumDesktop.saveTowerBalance(balanceKind, balanceDraft);
+    balanceLabStatus.textContent = result.ok ? "SAVED // CONFIG FILE UPDATED" : "SAVE FAILED";
+  } catch (error) {
+    balanceLabStatus.textContent = "SAVE FAILED // " + (error instanceof Error ? error.message : "UNKNOWN ERROR");
+  }
+};
+
 const checkForUpdate = async (): Promise<void> => {
   if (!window.monochromiumDesktop) return;
   renderUpdateState(await window.monochromiumDesktop.checkForUpdate());
@@ -705,6 +804,20 @@ const hydrateUpdater = async (): Promise<void> => {
   renderUpdateState(await window.monochromiumDesktop.getUpdateState());
   stopUpdateStateSubscription = window.monochromiumDesktop.onUpdateState(renderUpdateState);
 };
+
+const hydrateDevelopmentTools = async (): Promise<void> => {
+  const environment = await getDesktopEnvironment();
+  developmentBuild = Boolean(environment && !environment.packaged);
+  debugBalanceButton.hidden = !developmentBuild;
+};
+
+balanceTowerKind.addEventListener("change", () => {
+  const nextKind = balanceTowerKind.value as TowerKind;
+  if (!TOWER_ORDER.includes(nextKind)) return;
+  balanceKind = nextKind;
+  balanceDraft = cloneTowerDefinition(balanceKind);
+  renderBalanceLab();
+});
 
 const currentSaveBundle = (): SaveBundle => ({
   version: 1,
@@ -1640,6 +1753,7 @@ const hydrateDiskPersistence = async (): Promise<void> => {
 
 void hydrateDiskPersistence();
 void hydrateUpdater();
+void hydrateDevelopmentTools();
 
 const importEnemiesFromFile = async (file: File): Promise<void> => {
   try {
@@ -2123,6 +2237,21 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "debug-close":
       debugPanel.hidden = true;
       break;
+    case "debug-balance":
+      openBalanceLab();
+      break;
+    case "debug-balance-close":
+      balanceLab.hidden = true;
+      break;
+    case "debug-balance-reset":
+      balanceDraft = cloneTowerDefinition(balanceKind);
+      renderBalanceLab();
+      applyBalanceDraft();
+      balanceLabStatus.textContent = "FORM RESET // LIVE VALUES RESTORED";
+      break;
+    case "debug-balance-save":
+      void saveBalanceToConfig();
+      break;
     case "debug-cash-toggle":
       game.toggleInfiniteCash();
       break;
@@ -2194,6 +2323,15 @@ app.addEventListener("click", (event) => {
 
 app.addEventListener("input", (event) => {
   const field = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  const balancePath = field.dataset["balancePath"];
+  if (balanceDraft && balancePath) {
+    const value = Number(field.value);
+    if (Number.isFinite(value)) {
+      setBalanceValueAtPath(balancePath, value);
+      applyBalanceDraft();
+    }
+    return;
+  }
   const mapField = field.dataset["mapField"];
   if (mapDraft && mapField) {
     if (mapField === "name") {

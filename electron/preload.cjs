@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("monochromiumDesktop", Object.freeze({
   replaceSave: (bundle) => ipcRenderer.invoke("save:replace", bundle),
   saveSection: (section, value) => ipcRenderer.invoke("save:section", section, value),
   getEnvironment: () => ipcRenderer.invoke("desktop:environment"),
+  saveTowerBalance: (kind, definition) => ipcRenderer.invoke("balance:save-tower", kind, definition),
   getUpdateState: () => ipcRenderer.invoke("updater:state"),
   checkForUpdate: () => ipcRenderer.invoke("updater:check"),
   downloadUpdate: () => ipcRenderer.invoke("updater:download"),

@@ -420,6 +420,19 @@ export class Game {
     this.emitUi();
   }
 
+  applyDebugTowerBalance(kind: TowerKind): void {
+    const definition = TOWER_DEFINITIONS[kind];
+    this.towers.filter((tower) => tower.kind === kind).forEach((tower) => {
+      const stats = this.towerStats(tower);
+      tower.maxHp = Math.round(definition.onPath.hp * stats.hpMultiplier);
+      tower.hp = Math.min(tower.hp, tower.maxHp);
+      tower.maxAggro = tower.onPath ? definition.onPath.maxAggro : 0;
+      tower.ammo = stats.ammo ?? -1;
+    });
+    this.callbacks.onLog(`Debug // ${definition.name} balance applied to active constructs.`, "good");
+    this.emitUi();
+  }
+
   sellSelected(): void {
     const tower = this.selectedTower;
     if (!tower || this.gameOver) return;
