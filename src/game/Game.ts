@@ -12,7 +12,7 @@ import {
   WORLD_WIDTH,
 } from "./config.ts";
 import { getEnemyDefinition } from "./enemyRegistry.ts";
-import { createMapPathShape, drawMapCore, drawMapField, drawMapPath } from "./mapRendering.ts";
+import { createMapPathShape, drawMapBackdrop, drawMapCore, drawMapField, drawMapPath } from "./mapRendering.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import type {
   Enemy,
@@ -2423,8 +2423,7 @@ export class Game {
     const context = this.context;
     const viewport = this.viewport;
     context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = this.map.palette.field;
-    context.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    drawMapBackdrop(context, this.map, viewport, this.canvas.width, this.canvas.height);
     context.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.x, viewport.y);
     const shakeX = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;
     const shakeY = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;

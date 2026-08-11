@@ -1,6 +1,67 @@
 import { PATH_HALF_WIDTH, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
 import type { BlockedZone, MapDefinition } from "./types.ts";
 
+export interface MapViewport {
+  readonly x: number;
+  readonly y: number;
+  readonly scale: number;
+}
+
+/**
+ * Paints the complete screen behind the fixed-size world. Narrow displays
+ * need extra field above/below the route to keep every map object at the same
+ * proportions while avoiding solid letterbox bars.
+ */
+export const drawMapBackdrop = (
+  context: CanvasRenderingContext2D,
+  map: MapDefinition,
+  viewport: MapViewport,
+  width: number,
+  height: number,
+): void => {
+  context.save();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.fillStyle = map.palette.field;
+  context.fillRect(0, 0, width, height);
+
+  const centerX = viewport.x + 800 * viewport.scale;
+  const centerY = viewport.y + 350 * viewport.scale;
+  const glow = context.createRadialGradient(
+    centerX,
+    centerY,
+    Math.max(20, viewport.scale * 20),
+    centerX,
+    centerY,
+    Math.max(width, height) * 0.86,
+  );
+  glow.addColorStop(0, map.palette.glow);
+  glow.addColorStop(1, "rgba(0, 0, 0, 0)");
+  context.fillStyle = glow;
+  context.fillRect(0, 0, width, height);
+
+  const worldLeft = -viewport.x / viewport.scale;
+  const worldTop = -viewport.y / viewport.scale;
+  const worldRight = (width - viewport.x) / viewport.scale;
+  const worldBottom = (height - viewport.y) / viewport.scale;
+  const firstColumn = Math.floor(worldLeft / 40) * 40;
+  const firstRow = Math.floor(worldTop / 40) * 40;
+  for (let x = firstColumn; x <= worldRight; x += 40) {
+    context.strokeStyle = x % 200 === 0 ? "rgba(177,187,184,.08)" : "rgba(177,187,184,.035)";
+    context.beginPath();
+    context.moveTo(viewport.x + x * viewport.scale, 0);
+    context.lineTo(viewport.x + x * viewport.scale, height);
+    context.stroke();
+  }
+  for (let y = firstRow; y <= worldBottom; y += 40) {
+    context.strokeStyle = y % 200 === 0 ? "rgba(177,187,184,.08)" : "rgba(177,187,184,.035)";
+    context.beginPath();
+    context.moveTo(0, viewport.y + y * viewport.scale);
+    context.lineTo(width, viewport.y + y * viewport.scale);
+    context.stroke();
+  }
+  context.restore();
+};
+
 export const createMapPathShape = (map: MapDefinition): Path2D => {
   const shape = new Path2D();
   map.path.forEach((point, index) => {
