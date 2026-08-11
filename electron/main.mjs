@@ -14,6 +14,7 @@ const saveSections = new Map([
   ["custom-modes", "customModes"],
   ["custom-enemies", "customEnemies"],
   ["custom-maps", "customMaps"],
+  ["creator-folders", "creatorFolders"],
 ]);
 
 const updateFeedTemplate = configuredUpdateValue(updateConfig.feedUrl, "MONOCHROMIUM_UPDATE_FEED_URL");
@@ -178,6 +179,7 @@ const freshSave = () => ({
   customModes: [],
   customEnemies: [],
   customMaps: [],
+  creatorFolders: { version: 1, modes: [], enemies: [], maps: [], assignments: { modes: {}, enemies: {}, maps: {} } },
 });
 
 const normalizeSave = (value) => {
@@ -188,6 +190,9 @@ const normalizeSave = (value) => {
     customModes: Array.isArray(source.customModes) ? source.customModes : [],
     customEnemies: Array.isArray(source.customEnemies) ? source.customEnemies : [],
     customMaps: Array.isArray(source.customMaps) ? source.customMaps : [],
+    creatorFolders: source.creatorFolders && typeof source.creatorFolders === "object" && !Array.isArray(source.creatorFolders)
+      ? source.creatorFolders
+      : { version: 1, modes: [], enemies: [], maps: [], assignments: { modes: {}, enemies: {}, maps: {} } },
   };
 };
 

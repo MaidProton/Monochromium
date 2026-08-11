@@ -276,6 +276,7 @@ export interface MapDefinition {
   readonly difficulty: "Easy" | "Medium" | "Hard";
   readonly description: string;
   readonly rewardMultiplier: number;
+  readonly mapScale: number;
   readonly path: readonly Point[];
   readonly core: Point;
   readonly entryLabel: Point;

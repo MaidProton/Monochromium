@@ -1,8 +1,11 @@
 import "./style.css";
 import {
   COMBAT_RULES,
+  DEFAULT_MAP_SCALE,
   ECONOMY_RULES,
   MAP_DEFINITIONS,
+  MAP_SCALE_MAX,
+  MAP_SCALE_MIN,
   NORMAL_MODE,
   TOWER_DEFINITIONS,
   TOWER_ORDER,
@@ -27,6 +30,7 @@ import {
   customModeToDefinition,
   deleteCustomMode,
   loadCustomModes,
+  saveCustomModes,
   sanitizeCustomModes,
   upsertCustomMode,
   type CustomModeDraft,
@@ -40,6 +44,7 @@ import {
   customMapToDefinition,
   deleteCustomMap,
   loadCustomMaps,
+  saveCustomMaps,
   sanitizeCustomMaps,
   snapMapCoordinate,
   terminalPoint,
@@ -50,10 +55,35 @@ import {
   type MapEdge,
 } from "./game/customMaps.ts";
 import { getAllEnemyDefinitions, getOfficialEnemyDefinitions, isKnownEnemyKind, setCustomEnemyRegistry } from "./game/enemyRegistry.ts";
-import { createMapPathShape, drawBlockedZone, drawMapCore, drawMapField, drawMapPath } from "./game/mapRendering.ts";
+import {
+  createMapPathShape,
+  drawBlockedZone,
+  drawMapBackdrop,
+  drawMapCore,
+  drawMapField,
+  drawMapPath,
+  mapWorldBounds,
+  normalizedMapScale,
+  scaleMapDefinition,
+  scaleMapPoint,
+} from "./game/mapRendering.ts";
 import { clamp, distance, Polyline } from "./game/math.ts";
 import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, unlockEveryTower, unlockTower } from "./game/meta.ts";
 import { getDesktopEnvironment, hasDiskSaveApi, loadDiskSave, replaceDiskSave, type SaveBundle } from "./game/persistence.ts";
+import {
+  assignCreatorAssets,
+  assignmentFor,
+  cacheCreatorFoldersLocally,
+  createCreatorFolder,
+  deleteCreatorFolder,
+  foldersFor,
+  loadCreatorFolders,
+  renameCreatorFolder,
+  sanitizeCreatorFolders,
+  saveCreatorFolders,
+  type CreatorFolderKind,
+  type CreatorFolderState,
+} from "./game/creatorFolders.ts";
 import type { BlockedZone, MapDefinition, MapKind, ModeDefinition, Point, TargetingMode, TowerDefinition, TowerKind } from "./game/types.ts";
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -194,9 +224,15 @@ app.innerHTML = `
           <div class="creator-actions">
             <input id="enemy-import-input" type="file" accept="application/json,.json" hidden>
             <button class="secondary-button" data-action="import-enemies">IMPORT ENEMIES</button>
-            <button class="secondary-button" data-action="export-selected-enemies" id="export-selected-enemies">EXPORT SELECTED <span id="selected-enemy-count">0</span></button>
+            <button class="secondary-button" data-action="export-selected-enemies" id="export-selected-enemies" disabled>EXPORT SELECTED <span id="selected-enemy-count">0</span></button>
             <button class="primary-button" data-action="new-enemy">CREATE ENEMY <span>+</span></button>
           </div>
+        </div>
+        <div class="creator-folder-bar" data-folder-kind="enemies">
+          <div class="creator-folder-bar-head"><div><span>ORGANIZATION // ENEMY FOLDERS</span><small id="enemy-folder-summary">ALL CREATED ENEMIES</small></div><div class="creator-folder-actions"><button data-action="folder-create" data-folder-kind="enemies">NEW FOLDER</button><button data-action="folder-rename" data-folder-kind="enemies" disabled>RENAME</button><button class="danger" data-action="folder-delete" data-folder-kind="enemies" disabled>DELETE</button></div></div>
+          <form class="creator-folder-editor" data-folder-kind="enemies" hidden><label><span data-folder-editor-label>NEW FOLDER NAME</span><input data-folder-name maxlength="40" autocomplete="off" placeholder="e.g. NORMAL MODE ENEMIES"></label><div><button class="primary-button" type="submit" data-folder-editor-submit>CREATE FOLDER</button><button type="button" data-action="folder-editor-cancel" data-folder-kind="enemies">CANCEL</button></div></form>
+          <div class="creator-folder-list" id="enemy-folder-list"></div>
+          <div class="creator-folder-tools"><small>Select cards below, then organize them into the open folder.</small><div><button data-action="folder-select-all" data-folder-kind="enemies">SELECT ALL IN VIEW</button><button data-action="folder-move-selected" data-folder-kind="enemies" disabled>MOVE SELECTED HERE</button></div></div>
         </div>
         <div class="enemy-library">
           <section>
@@ -260,9 +296,16 @@ app.innerHTML = `
           <div><div class="onboarding-kicker">FINITE TIMELINES</div><h2>MODE LIST</h2></div>
           <div class="creator-actions">
             <input id="mode-import-input" type="file" accept="application/json,.json" hidden>
-            <button class="secondary-button" data-action="import-mode">IMPORT MODE</button>
+            <button class="secondary-button" data-action="import-mode">IMPORT MODES</button>
+            <button class="secondary-button" data-action="export-selected-modes" id="export-selected-modes" disabled>EXPORT SELECTED <span id="selected-mode-count">0</span></button>
             <button class="primary-button" data-action="new-mode">CREATE MODE <span>+</span></button>
           </div>
+        </div>
+        <div class="creator-folder-bar" data-folder-kind="modes">
+          <div class="creator-folder-bar-head"><div><span>ORGANIZATION // MODE FOLDERS</span><small id="mode-folder-summary">ALL CREATED MODES</small></div><div class="creator-folder-actions"><button data-action="folder-create" data-folder-kind="modes">NEW FOLDER</button><button data-action="folder-rename" data-folder-kind="modes" disabled>RENAME</button><button class="danger" data-action="folder-delete" data-folder-kind="modes" disabled>DELETE</button></div></div>
+          <form class="creator-folder-editor" data-folder-kind="modes" hidden><label><span data-folder-editor-label>NEW FOLDER NAME</span><input data-folder-name maxlength="40" autocomplete="off" placeholder="e.g. CHALLENGE MODES"></label><div><button class="primary-button" type="submit" data-folder-editor-submit>CREATE FOLDER</button><button type="button" data-action="folder-editor-cancel" data-folder-kind="modes">CANCEL</button></div></form>
+          <div class="creator-folder-list" id="mode-folder-list"></div>
+          <div class="creator-folder-tools"><small>Select cards below, then organize them into the open folder.</small><div><button data-action="folder-select-all" data-folder-kind="modes">SELECT ALL IN VIEW</button><button data-action="folder-move-selected" data-folder-kind="modes" disabled>MOVE SELECTED HERE</button></div></div>
         </div>
         <div class="mode-library">
           <section>
@@ -298,9 +341,16 @@ app.innerHTML = `
           <div><div class="onboarding-kicker">BATTLEFIELD DATABASE</div><h2>MAP LIST</h2></div>
           <div class="creator-actions">
             <input id="map-import-input" type="file" accept="application/json,.json" hidden>
-            <button class="secondary-button" data-action="import-map">IMPORT MAP</button>
+            <button class="secondary-button" data-action="import-map">IMPORT MAPS</button>
+            <button class="secondary-button" data-action="export-selected-maps" id="export-selected-maps" disabled>EXPORT SELECTED <span id="selected-map-count">0</span></button>
             <button class="primary-button" data-action="new-map">CREATE MAP <span>+</span></button>
           </div>
+        </div>
+        <div class="creator-folder-bar" data-folder-kind="maps">
+          <div class="creator-folder-bar-head"><div><span>ORGANIZATION // MAP FOLDERS</span><small id="map-folder-summary">ALL CREATED MAPS</small></div><div class="creator-folder-actions"><button data-action="folder-create" data-folder-kind="maps">NEW FOLDER</button><button data-action="folder-rename" data-folder-kind="maps" disabled>RENAME</button><button class="danger" data-action="folder-delete" data-folder-kind="maps" disabled>DELETE</button></div></div>
+          <form class="creator-folder-editor" data-folder-kind="maps" hidden><label><span data-folder-editor-label>NEW FOLDER NAME</span><input data-folder-name maxlength="40" autocomplete="off" placeholder="e.g. HARD MAPS"></label><div><button class="primary-button" type="submit" data-folder-editor-submit>CREATE FOLDER</button><button type="button" data-action="folder-editor-cancel" data-folder-kind="maps">CANCEL</button></div></form>
+          <div class="creator-folder-list" id="map-folder-list"></div>
+          <div class="creator-folder-tools"><small>Select cards below, then organize them into the open folder.</small><div><button data-action="folder-select-all" data-folder-kind="maps">SELECT ALL IN VIEW</button><button data-action="folder-move-selected" data-folder-kind="maps" disabled>MOVE SELECTED HERE</button></div></div>
         </div>
         <div class="map-library-grid">
           <section>
@@ -331,6 +381,7 @@ app.innerHTML = `
             <label><span>DIFFICULTY</span><select data-map-field="difficulty"><option>Easy</option><option>Medium</option><option>Hard</option></select></label>
             <label><span>ENTRY EDGE</span><select data-map-field="entryEdge"><option value="left">LEFT</option><option value="right">RIGHT</option><option value="top">TOP</option><option value="bottom">BOTTOM</option></select></label>
             <label><span>EXIT EDGE</span><select data-map-field="exitEdge"><option value="left">LEFT</option><option value="right">RIGHT</option><option value="top">TOP</option><option value="bottom">BOTTOM</option></select></label>
+            <label><span>MAP SCALE</span><input data-map-field="mapScale" type="number" min="${MAP_SCALE_MIN}" max="${MAP_SCALE_MAX}" step="0.1" inputmode="decimal"></label>
           </section>
           <div class="map-editor-main">
             <div class="map-canvas-column">
@@ -570,6 +621,7 @@ let customEnemies = loadCustomEnemies();
 setCustomEnemyRegistry(customEnemies);
 let customModes = loadCustomModes();
 let customMaps = loadCustomMaps();
+let creatorFolders = loadCreatorFolders();
 let selectedMode: ModeDefinition = NORMAL_MODE;
 let activeMode: ModeDefinition = NORMAL_MODE;
 let creatorDraft: CustomModeDraft | null = null;
@@ -583,6 +635,11 @@ let mapDragState: { type: "point" | "zone" | "resize"; start: Point; original: C
 let libraryReturnScreen: "main" | "creators" = "main";
 let mapTestActive = false;
 const selectedEnemyIds = new Set<string>();
+const selectedModeIds = new Set<string>();
+const selectedMapIds = new Set<string>();
+let activeModeFolderId: string | null = null;
+let activeEnemyFolderId: string | null = null;
+let activeMapFolderId: string | null = null;
 let runSettled = false;
 const BATTLE_LOG_HIDDEN_KEY = "monochromium:battle-log-hidden";
 try {
@@ -655,6 +712,16 @@ const updateSelectedEnemyCount = (): void => {
   query<HTMLButtonElement>("#export-selected-enemies").disabled = selectedEnemyIds.size === 0;
 };
 
+const updateSelectedModeCount = (): void => {
+  query<HTMLElement>("#selected-mode-count").textContent = selectedModeIds.size.toString();
+  query<HTMLButtonElement>("#export-selected-modes").disabled = selectedModeIds.size === 0;
+};
+
+const updateSelectedMapCount = (): void => {
+  query<HTMLElement>("#selected-map-count").textContent = selectedMapIds.size.toString();
+  query<HTMLButtonElement>("#export-selected-maps").disabled = selectedMapIds.size === 0;
+};
+
 const exportEnemyBundle = (enemies: readonly CustomEnemyDraft[], filename: string): void => {
   downloadJson(filename, {
     type: "monochromium-custom-enemies",
@@ -662,6 +729,24 @@ const exportEnemyBundle = (enemies: readonly CustomEnemyDraft[], filename: strin
     enemies,
   });
   setSaveStatus(`${enemies.length} ${enemies.length === 1 ? "enemy" : "enemies"} exported.`, "good");
+};
+
+const exportModeBundle = (modes: readonly CustomModeDraft[], filename: string): void => {
+  downloadJson(filename, {
+    type: "monochromium-custom-modes",
+    version: 1,
+    modes,
+  });
+  setSaveStatus(`${modes.length} ${modes.length === 1 ? "mode" : "modes"} exported.`, "good");
+};
+
+const exportMapBundle = (maps: readonly CustomMapDraft[], filename: string): void => {
+  downloadJson(filename, {
+    type: "monochromium-custom-maps",
+    version: 1,
+    maps,
+  });
+  setSaveStatus(`${maps.length} ${maps.length === 1 ? "map" : "maps"} exported.`, "good");
 };
 
 const exportModeFile = (mode: CustomModeDraft): void => {
@@ -827,6 +912,7 @@ const currentSaveBundle = (): SaveBundle => ({
   customModes,
   customEnemies,
   customMaps,
+  creatorFolders,
 });
 
 const exportSaveBackup = async (): Promise<void> => {
@@ -868,6 +954,127 @@ const escapeHtml = (value: string): string => value.replace(/[&<>"]/g, (characte
   "\"": "&quot;",
 })[character] ?? character);
 
+type CreatorAsset = { readonly id: string };
+const UNFILED_FOLDER_ID = "__unfiled__";
+
+const isCreatorFolderKind = (value: string | undefined): value is CreatorFolderKind =>
+  value === "modes" || value === "enemies" || value === "maps";
+
+const activeFolderIdFor = (kind: CreatorFolderKind): string | null => {
+  if (kind === "modes") return activeModeFolderId;
+  if (kind === "enemies") return activeEnemyFolderId;
+  return activeMapFolderId;
+};
+
+const setActiveFolderId = (kind: CreatorFolderKind, folderId: string | null): void => {
+  if (kind === "modes") activeModeFolderId = folderId;
+  else if (kind === "enemies") activeEnemyFolderId = folderId;
+  else activeMapFolderId = folderId;
+};
+
+const selectedIdsFor = (kind: CreatorFolderKind): Set<string> => {
+  if (kind === "modes") return selectedModeIds;
+  if (kind === "enemies") return selectedEnemyIds;
+  return selectedMapIds;
+};
+
+const folderAssets = (kind: CreatorFolderKind): readonly CreatorAsset[] => {
+  if (kind === "modes") return customModes;
+  if (kind === "enemies") return customEnemies;
+  return customMaps;
+};
+
+const folderStem = (kind: CreatorFolderKind): string => kind === "modes" ? "mode" : kind === "enemies" ? "enemy" : "map";
+
+const folderElementId = (kind: CreatorFolderKind): string => `${folderStem(kind)}-folder-list`;
+
+const folderTitle = (kind: CreatorFolderKind): string => kind === "modes" ? "MODES" : kind === "enemies" ? "ENEMIES" : "MAPS";
+
+const folderAssetCount = (kind: CreatorFolderKind, folderId: string | null): number => {
+  const assets = folderAssets(kind);
+  if (!folderId) return assets.length;
+  if (folderId === UNFILED_FOLDER_ID) return assets.filter((asset) => assignmentFor(creatorFolders, kind, asset.id) === null).length;
+  return assets.filter((asset) => assignmentFor(creatorFolders, kind, asset.id) === folderId).length;
+};
+
+const assetMatchesFolder = (kind: CreatorFolderKind, assetId: string, folderId: string | null): boolean => {
+  if (folderId === null) return true;
+  const assignment = assignmentFor(creatorFolders, kind, assetId);
+  return folderId === UNFILED_FOLDER_ID ? assignment === null : assignment === folderId;
+};
+
+const renderCreatorFolderBar = (kind: CreatorFolderKind): void => {
+  const list = query<HTMLElement>(`#${folderElementId(kind)}`);
+  let activeFolderId = activeFolderIdFor(kind);
+  const folders = foldersFor(creatorFolders, kind);
+  const assets = folderAssets(kind);
+  const selected = selectedIdsFor(kind);
+  const activeFolder = folders.find((folder) => folder.id === activeFolderId) ?? null;
+  const unfiledActive = activeFolderId === UNFILED_FOLDER_ID;
+  if (activeFolderId && !unfiledActive && !activeFolder) {
+    setActiveFolderId(kind, null);
+    activeFolderId = null;
+  }
+  list.innerHTML = [
+    `<button class="creator-folder-tab system${activeFolderId === null ? " active" : ""}" data-action="folder-select" data-folder-kind="${kind}" data-folder-id=""><span>ALL ${folderTitle(kind)}</span><small>${assets.length}</small></button>`,
+    `<button class="creator-folder-tab system${unfiledActive ? " active" : ""}" data-action="folder-select" data-folder-kind="${kind}" data-folder-id="${UNFILED_FOLDER_ID}"><span>UNFILED</span><small>${folderAssetCount(kind, UNFILED_FOLDER_ID)}</small></button>`,
+    ...folders.map((folder) => `<button class="creator-folder-tab${folder.id === activeFolderId ? " active" : ""}" data-action="folder-select" data-folder-kind="${kind}" data-folder-id="${escapeHtml(folder.id)}"><span>${escapeHtml(folder.name)}</span><small>${folderAssetCount(kind, folder.id)}</small></button>`),
+  ].join("");
+  const bar = list.closest<HTMLElement>(".creator-folder-bar");
+  if (!bar) return;
+  query<HTMLElement>(`#${folderStem(kind)}-folder-summary`).textContent = activeFolder
+    ? `${activeFolder.name} // ${folderAssetCount(kind, activeFolder.id)} CHILDREN`
+    : unfiledActive
+      ? `UNFILED // ${folderAssetCount(kind, UNFILED_FOLDER_ID)} ITEMS`
+      : `ALL CREATED ${folderTitle(kind)}`;
+  const rename = bar.querySelector<HTMLButtonElement>("[data-action='folder-rename']");
+  const remove = bar.querySelector<HTMLButtonElement>("[data-action='folder-delete']");
+  const move = bar.querySelector<HTMLButtonElement>("[data-action='folder-move-selected']");
+  if (rename) rename.disabled = !activeFolder;
+  if (remove) remove.disabled = !activeFolder;
+  if (move) {
+    move.disabled = activeFolderId === null || selected.size === 0;
+    move.textContent = unfiledActive ? "MOVE TO UNFILED" : "MOVE SELECTED HERE";
+  }
+};
+
+const persistCreatorFolderState = (next: CreatorFolderState): void => {
+  creatorFolders = sanitizeCreatorFolders(next);
+  saveCreatorFolders(creatorFolders);
+};
+
+const closeFolderEditor = (kind: CreatorFolderKind): void => {
+  const form = query<HTMLFormElement>(`.creator-folder-editor[data-folder-kind='${kind}']`);
+  form.hidden = true;
+  form.classList.remove("invalid");
+  form.dataset["folderEditorMode"] = "";
+  form.dataset["folderId"] = "";
+  query<HTMLElement>(`.creator-folder-bar[data-folder-kind='${kind}']`).classList.remove("editing");
+};
+
+const openFolderEditor = (kind: CreatorFolderKind, mode: "create" | "rename"): void => {
+  const form = query<HTMLFormElement>(`.creator-folder-editor[data-folder-kind='${kind}']`);
+  const input = form.querySelector<HTMLInputElement>("[data-folder-name]");
+  const label = form.querySelector<HTMLElement>("[data-folder-editor-label]");
+  const submit = form.querySelector<HTMLButtonElement>("[data-folder-editor-submit]");
+  if (!input || !label || !submit) return;
+  const folderId = mode === "rename" ? activeFolderIdFor(kind) : null;
+  const folder = folderId ? foldersFor(creatorFolders, kind).find((candidate) => candidate.id === folderId) : null;
+  if (mode === "rename" && !folder) return;
+  form.hidden = false;
+  form.classList.remove("invalid");
+  form.dataset["folderEditorMode"] = mode;
+  form.dataset["folderId"] = folder?.id ?? "";
+  label.textContent = mode === "rename" ? "RENAME FOLDER" : "NEW FOLDER NAME";
+  submit.textContent = mode === "rename" ? "SAVE NAME" : "CREATE FOLDER";
+  input.value = folder?.name ?? "";
+  query<HTMLElement>(`.creator-folder-bar[data-folder-kind='${kind}']`).classList.add("editing");
+  window.requestAnimationFrame(() => {
+    input.focus();
+    if (mode === "rename") input.select();
+  });
+};
+
 const polygonClipPath = (sides: number): string => {
   const count = Math.max(3, Math.min(12, Math.round(sides)));
   const points = Array.from({ length: count }, (_, index) => {
@@ -888,18 +1095,20 @@ const enemyStatLine = (enemy: { hp: number; shieldHp: number; speed: number; dam
 };
 
 const renderEnemyList = (): void => {
+  renderCreatorFolderBar("enemies");
   query<HTMLElement>("#official-enemy-list").innerHTML = getOfficialEnemyDefinitions().map((enemy) => {
     const sides = enemy.sprite.shape === "circle" ? 12 : enemy.sprite.shape === "hexagon" ? 6 : 4;
     const specials = [enemy.hidden ? "HIDDEN" : "", enemy.summon ? "SUMMONER" : "", enemy.shockwave ? "STUN" : "", enemy.boss ? "BOSS" : ""].filter(Boolean).join(" // ");
     return `<article class="enemy-library-card official">${enemyShapeCard(enemy.name, enemy.sprite.fill.startsWith("#") ? enemy.sprite.fill : enemy.sprite.accent, sides)}<div><small>OFFICIAL // READ ONLY</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemyStatLine(enemy)}</p>${specials ? `<b>${specials}</b>` : ""}</div></article>`;
   }).join("");
   const list = query<HTMLElement>("#custom-enemy-list");
-  if (customEnemies.length === 0) {
-    list.innerHTML = `<div class="empty-mode-list"><strong>NO CREATED ENEMIES</strong><span>Create a polygon hostile for custom modes.</span></div>`;
+  const visibleEnemies = customEnemies.filter((enemy) => assetMatchesFolder("enemies", enemy.id, activeEnemyFolderId));
+  if (visibleEnemies.length === 0) {
+    list.innerHTML = `<div class="empty-mode-list"><strong>${customEnemies.length === 0 ? "NO CREATED ENEMIES" : "FOLDER IS EMPTY"}</strong><span>${customEnemies.length === 0 ? "Create a polygon hostile for custom modes." : "Select another folder or move an enemy here."}</span></div>`;
     updateSelectedEnemyCount();
     return;
   }
-  list.innerHTML = customEnemies.map((enemy) => {
+  list.innerHTML = visibleEnemies.map((enemy) => {
     const specials = [enemy.hidden ? "HIDDEN" : "", enemy.summoningEnabled ? "SUMMONER" : "", enemy.stunningEnabled ? "STUN" : "", enemy.boss ? "BOSS" : ""].filter(Boolean).join(" // ");
     return `<article class="enemy-library-card">${enemyShapeCard(enemy.name, enemy.color, enemy.sides)}<div><small>CREATED // ${enemy.sides} SIDES</small><strong>${escapeHtml(enemy.name)}</strong><p>${enemyStatLine(enemy)}</p>${specials ? `<b>${specials}</b>` : ""}</div><div class="enemy-card-actions"><label class="enemy-select"><input type="checkbox" data-enemy-select="${escapeHtml(enemy.id)}" ${selectedEnemyIds.has(enemy.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EXPORT</button><button data-action="edit-enemy" data-enemy-id="${escapeHtml(enemy.id)}">EDIT</button><button class="danger" data-action="delete-enemy" data-enemy-id="${escapeHtml(enemy.id)}">DELETE</button></div></article>`;
   }).join("");
@@ -945,12 +1154,15 @@ const renderEnemyCreator = (): void => {
 };
 
 const renderModeList = (): void => {
+  renderCreatorFolderBar("modes");
   const list = query<HTMLElement>("#custom-mode-list");
-  if (customModes.length === 0) {
-    list.innerHTML = `<div class="empty-mode-list"><strong>NO CREATED MODES</strong><span>Open the creator to build a local finite timeline.</span></div>`;
+  const visibleModes = customModes.filter((mode) => assetMatchesFolder("modes", mode.id, activeModeFolderId));
+  if (visibleModes.length === 0) {
+    list.innerHTML = `<div class="empty-mode-list"><strong>${customModes.length === 0 ? "NO CREATED MODES" : "FOLDER IS EMPTY"}</strong><span>${customModes.length === 0 ? "Open the creator to build a local finite timeline." : "Select another folder or move a mode here."}</span></div>`;
+    updateSelectedModeCount();
     return;
   }
-  list.innerHTML = customModes.map((mode) => {
+  list.innerHTML = visibleModes.map((mode) => {
     const missingEnemies = getMissingCustomEnemyIds(mode);
     const dependencyNotice = missingEnemies.length > 0
       ? `<b class="missing-dependency">LOCKED // IMPORT: ${escapeHtml(formatMissingCustomEnemies(missingEnemies))}</b>`
@@ -963,6 +1175,7 @@ const renderModeList = (): void => {
         <p>${escapeHtml(mode.description)}</p>${dependencyNotice}
       </div>
       <div class="mode-entry-actions">
+        <label class="library-select"><input type="checkbox" data-mode-select="${escapeHtml(mode.id)}" ${selectedModeIds.has(mode.id) ? "checked" : ""}><span>SELECT</span></label>
         <button class="primary-button" data-action="select-mode" data-mode-id="${escapeHtml(mode.id)}" ${missingEnemies.length > 0 ? "disabled" : ""}>${missingEnemies.length > 0 ? "LOCKED" : "SELECT"}</button>
         <button class="secondary-button" data-action="export-mode" data-mode-id="${escapeHtml(mode.id)}">EXPORT</button>
         <button class="secondary-button" data-action="edit-mode" data-mode-id="${escapeHtml(mode.id)}">EDIT</button>
@@ -971,28 +1184,34 @@ const renderModeList = (): void => {
     </article>
   `;
   }).join("");
+  updateSelectedModeCount();
 };
 
 const mapPreviewSvg = (map: MapDefinition): string => {
-  const pathData = map.path.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(0)} ${point.y.toFixed(0)}`).join(" ");
-  const zones = map.blockedZones.map((zone) => `<rect x="${zone.x}" y="${zone.y}" width="${zone.width}" height="${zone.height}" fill="${map.palette.accent}" opacity=".18"/>`).join("");
-  return `<svg class="map-preview" viewBox="0 0 ${WORLD_WIDTH} ${WORLD_HEIGHT}" aria-hidden="true"><rect width="${WORLD_WIDTH}" height="${WORLD_HEIGHT}" fill="${map.palette.field}"/>${zones}<path d="${pathData}" fill="none" stroke="#000" stroke-width="118"/><path d="${pathData}" fill="none" stroke="${map.palette.path}" stroke-width="100"/><circle cx="${map.core.x}" cy="${map.core.y}" r="34" fill="none" stroke="${map.palette.accent}" stroke-width="8"/></svg>`;
+  const previewMap = scaleMapDefinition(map);
+  const bounds = mapWorldBounds(map.mapScale);
+  const pathData = previewMap.path.map((point, index) => `${index === 0 ? "M" : "L"}${point.x.toFixed(0)} ${point.y.toFixed(0)}`).join(" ");
+  const zones = previewMap.blockedZones.map((zone) => `<rect x="${zone.x}" y="${zone.y}" width="${zone.width}" height="${zone.height}" fill="${previewMap.palette.accent}" opacity=".18"/>`).join("");
+  return `<svg class="map-preview" viewBox="${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}" aria-hidden="true"><rect x="${bounds.x}" y="${bounds.y}" width="${bounds.width}" height="${bounds.height}" fill="${previewMap.palette.field}"/>${zones}<path d="${pathData}" fill="none" stroke="#000" stroke-width="118"/><path d="${pathData}" fill="none" stroke="${previewMap.palette.path}" stroke-width="100"/><circle cx="${previewMap.core.x}" cy="${previewMap.core.y}" r="34" fill="none" stroke="${previewMap.palette.accent}" stroke-width="8"/></svg>`;
 };
 
 const mapLibraryCard = (map: MapDefinition, custom: CustomMapDraft | null): string => `
   <article class="map-library-card">
     ${mapPreviewSvg(map)}
-    <div><small>${map.isCustom ? "CREATED // SANDBOX" : `OFFICIAL // MAP ${map.index.toString().padStart(2, "0")}`}</small><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><b>${map.difficulty.toUpperCase()} // ${Math.round(new Polyline(map.path).totalLength).toLocaleString()} ROUTE UNITS // ${map.blockedZones.length} BLOCK ZONES</b></div>
-    ${custom ? `<div class="map-card-actions"><button data-action="export-map" data-map-id="${escapeHtml(custom.id)}">EXPORT</button><button data-action="edit-map" data-map-id="${escapeHtml(custom.id)}">EDIT</button><button class="danger" data-action="delete-map" data-map-id="${escapeHtml(custom.id)}">DELETE</button></div>` : ""}
+    <div><small>${map.isCustom ? "CREATED // SANDBOX" : `OFFICIAL // MAP ${map.index.toString().padStart(2, "0")}`}</small><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><b>${map.difficulty.toUpperCase()} // ${Math.round(new Polyline(map.path).totalLength * normalizedMapScale(map.mapScale)).toLocaleString()} ROUTE UNITS // SCALE ${normalizedMapScale(map.mapScale).toFixed(1)}X // ${map.blockedZones.length} BLOCK ZONES</b></div>
+    ${custom ? `<div class="map-card-actions"><label class="library-select"><input type="checkbox" data-map-select="${escapeHtml(custom.id)}" ${selectedMapIds.has(custom.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-map" data-map-id="${escapeHtml(custom.id)}">EXPORT</button><button data-action="edit-map" data-map-id="${escapeHtml(custom.id)}">EDIT</button><button class="danger" data-action="delete-map" data-map-id="${escapeHtml(custom.id)}">DELETE</button></div>` : ""}
   </article>`;
 
 const renderMapLibrary = (): void => {
+  renderCreatorFolderBar("maps");
   query<HTMLElement>("#official-map-list").innerHTML = Object.values(MAP_DEFINITIONS)
     .map((map) => mapLibraryCard(map, null)).join("");
   const list = query<HTMLElement>("#custom-map-list");
-  list.innerHTML = customMaps.length === 0
-    ? `<div class="empty-mode-list"><strong>NO CREATED MAPS</strong><span>Create a route, palette, and restricted build layout.</span></div>`
-    : customMaps.map((draft) => mapLibraryCard(customMapToDefinition(draft), draft)).join("");
+  const visibleMaps = customMaps.filter((draft) => assetMatchesFolder("maps", draft.id, activeMapFolderId));
+  list.innerHTML = visibleMaps.length === 0
+    ? `<div class="empty-mode-list"><strong>${customMaps.length === 0 ? "NO CREATED MAPS" : "FOLDER IS EMPTY"}</strong><span>${customMaps.length === 0 ? "Create a route, palette, and restricted build layout." : "Select another folder or move a map here."}</span></div>`
+    : visibleMaps.map((draft) => mapLibraryCard(customMapToDefinition(draft), draft)).join("");
+  updateSelectedMapCount();
 };
 
 const renderPlayMapGrid = (): void => {
@@ -1063,9 +1282,23 @@ const renderCreator = (): void => {
 
 const mapCanvasPoint = (event: PointerEvent | MouseEvent): Point => {
   const bounds = mapEditorCanvas.getBoundingClientRect();
-  return {
+  const screenPoint = {
     x: (event.clientX - bounds.left) * (WORLD_WIDTH / bounds.width),
     y: (event.clientY - bounds.top) * (WORLD_HEIGHT / bounds.height),
+  };
+  const mapScale = normalizedMapScale(mapDraft?.mapScale ?? DEFAULT_MAP_SCALE);
+  const zoom = 1 / mapScale;
+  const viewport = {
+    x: (WORLD_WIDTH - WORLD_WIDTH * zoom) / 2,
+    y: (WORLD_HEIGHT - WORLD_HEIGHT * zoom) / 2,
+  };
+  const runtimePoint = {
+    x: (screenPoint.x - viewport.x) / zoom,
+    y: (screenPoint.y - viewport.y) / zoom,
+  };
+  return {
+    x: (runtimePoint.x - WORLD_WIDTH / 2) / mapScale + WORLD_WIDTH / 2,
+    y: (runtimePoint.y - WORLD_HEIGHT / 2) / mapScale + WORLD_HEIGHT / 2,
   };
 };
 
@@ -1092,15 +1325,26 @@ const drawMapEditor = (): void => {
   if (!mapDraft) return;
   const context = mapEditorCanvas.getContext("2d");
   if (!context) return;
-  const definition = customMapToDefinition(mapDraft);
+  const definition = scaleMapDefinition(customMapToDefinition(mapDraft));
   const shape = createMapPathShape(definition);
+  const mapScale = normalizedMapScale(mapDraft.mapScale);
+  const zoom = 1 / mapScale;
+  const viewport = {
+    x: (WORLD_WIDTH - WORLD_WIDTH * zoom) / 2,
+    y: (WORLD_HEIGHT - WORLD_HEIGHT * zoom) / 2,
+    scale: zoom,
+  };
+  context.setTransform(1, 0, 0, 1, 0, 0);
   context.clearRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+  drawMapBackdrop(context, definition, viewport, WORLD_WIDTH, WORLD_HEIGHT);
+  context.save();
+  context.setTransform(zoom, 0, 0, zoom, viewport.x, viewport.y);
   drawMapField(context, definition);
   drawMapPath(context, definition, shape);
   drawMapCore(context, definition);
   if (mapSelectionState?.type === "zone") {
     const selectedZoneId = mapSelectionState.id;
-    const zone = mapDraft.blockedZones.find((candidate) => candidate.id === selectedZoneId);
+    const zone = definition.blockedZones.find((candidate) => candidate.id === selectedZoneId);
     if (zone) {
       drawBlockedZone(context, zone, definition.palette.accent, true);
       context.fillStyle = definition.palette.accent;
@@ -1111,7 +1355,7 @@ const drawMapEditor = (): void => {
     }
   }
   mapDraft.path.forEach((rawPoint, index) => {
-    const point = mapPointForEditor(rawPoint);
+    const point = scaleMapPoint(mapPointForEditor(rawPoint), mapScale);
     const terminal = index === 0 || index === mapDraft!.path.length - 1;
     const selected = mapSelectionState?.type === "point" && mapSelectionState.index === index;
     context.beginPath();
@@ -1126,6 +1370,7 @@ const drawMapEditor = (): void => {
     context.textAlign = "center";
     context.fillText(terminal ? (index === 0 ? "IN" : "OUT") : `${index}`, point.x, point.y + 4);
   });
+  context.restore();
 };
 
 function renderMapEditor(): void {
@@ -1136,11 +1381,13 @@ function renderMapEditor(): void {
   field("difficulty").value = mapDraft.difficulty;
   field("entryEdge").value = mapDraft.entryEdge;
   field("exitEdge").value = mapDraft.exitEdge;
+  field("mapScale").value = mapDraft.mapScale.toString();
   field("field").value = mapDraft.palette.field;
   field("path").value = mapDraft.palette.path;
   field("accent").value = mapDraft.palette.accent;
   const validation = validateCustomMap(mapDraft);
-  query<HTMLElement>("#map-path-length").textContent = `${Math.round(validation.pathLength).toLocaleString()} ROUTE UNITS`;
+  const playablePathLength = validation.pathLength * normalizedMapScale(mapDraft.mapScale);
+  query<HTMLElement>("#map-path-length").textContent = `${Math.round(playablePathLength).toLocaleString()} ROUTE UNITS // ${normalizedMapScale(mapDraft.mapScale).toFixed(1)}X`;
   const validationState = query<HTMLElement>("#map-validation-state");
   validationState.textContent = validation.valid ? "ROUTE VALID" : `${validation.errors.length} ISSUES`;
   validationState.classList.toggle("valid", validation.valid);
@@ -1729,10 +1976,12 @@ const hydrateDiskPersistence = async (): Promise<void> => {
     setCustomEnemyRegistry(customEnemies);
     if (Array.isArray(disk.data.customModes)) customModes = sanitizeCustomModes(disk.data.customModes);
     if (Array.isArray(disk.data.customMaps)) customMaps = sanitizeCustomMaps(disk.data.customMaps);
+    creatorFolders = sanitizeCreatorFolders(disk.data.creatorFolders);
     cacheProgressLocally(progress);
     cacheCustomEnemiesLocally(customEnemies);
     cacheCustomModesLocally(customModes);
     cacheCustomMapsLocally(customMaps);
+    cacheCreatorFoldersLocally(creatorFolders);
     await replaceDiskSave(currentSaveBundle());
     game.setAvailableTowers(progress.unlockedTowers);
     renderMeta();
@@ -1783,21 +2032,27 @@ const importEnemiesFromFile = async (file: File): Promise<void> => {
 
 const importModeFromFile = async (file: File): Promise<void> => {
   try {
-    const parsed = JSON.parse(await file.text()) as { type?: unknown; mode?: unknown };
-    if (parsed?.type !== "monochromium-custom-mode" || !parsed.mode) {
-      throw new Error("This is not a Monochromium mode export.");
-    }
-    const imported = sanitizeCustomModes([parsed.mode])[0];
-    if (!imported) throw new Error("The export did not contain a valid mode.");
-    if (customModes.some((mode) => mode.id === imported.id) && !window.confirm(`Replace the existing mode "${imported.name}"?`)) return;
-    customModes = upsertCustomMode(customModes, imported);
+    const parsed = JSON.parse(await file.text()) as { type?: unknown; mode?: unknown; modes?: unknown };
+    const rawModes = parsed?.type === "monochromium-custom-modes" && Array.isArray(parsed.modes)
+      ? parsed.modes
+      : parsed?.type === "monochromium-custom-mode" && parsed.mode
+        ? [parsed.mode]
+        : null;
+    if (!rawModes) throw new Error("This is not a Monochromium mode export.");
+    const imported = sanitizeCustomModes(rawModes);
+    if (imported.length === 0) throw new Error("The export did not contain any valid modes.");
+    const conflicts = imported.filter((mode) => customModes.some((current) => current.id === mode.id));
+    if (conflicts.length > 0 && !window.confirm(`Replace ${conflicts.length} existing custom ${conflicts.length === 1 ? "mode" : "modes"}?`)) return;
+    customModes = sanitizeCustomModes([
+      ...customModes.filter((current) => !imported.some((mode) => mode.id === current.id)),
+      ...imported,
+    ]);
+    saveCustomModes(customModes);
     renderModeList();
-    const missingEnemies = getMissingCustomEnemyIds(imported);
-    const suffix = missingEnemies.length > 0
-      ? ` Locked // import: ${formatMissingCustomEnemies(missingEnemies)}.`
-      : "";
-    addLog(`Mode "${imported.name}" imported.${suffix}`, missingEnemies.length > 0 ? "danger" : "good");
-    setSaveStatus(`Mode "${imported.name}" imported.${suffix}`, missingEnemies.length > 0 ? "danger" : "good");
+    const lockedModes = imported.filter((mode) => getMissingCustomEnemyIds(mode).length > 0);
+    const suffix = lockedModes.length > 0 ? ` ${lockedModes.length} locked // missing custom enemies.` : "";
+    addLog(`${imported.length} custom ${imported.length === 1 ? "mode" : "modes"} imported.${suffix}`, lockedModes.length > 0 ? "danger" : "good");
+    setSaveStatus(`${imported.length} ${imported.length === 1 ? "mode" : "modes"} imported.${suffix}`, lockedModes.length > 0 ? "danger" : "good");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid mode export.";
     addLog(`Mode import failed // ${message}`, "danger");
@@ -1807,18 +2062,27 @@ const importModeFromFile = async (file: File): Promise<void> => {
 
 const importMapFromFile = async (file: File): Promise<void> => {
   try {
-    const parsed = JSON.parse(await file.text()) as { type?: unknown; map?: unknown };
-    if (parsed?.type !== "monochromium-custom-map" || !parsed.map) {
-      throw new Error("This is not a Monochromium map export.");
-    }
-    const imported = sanitizeCustomMaps([parsed.map])[0];
-    if (!imported) throw new Error("The export did not contain a valid playable map.");
-    if (customMaps.some((map) => map.id === imported.id) && !window.confirm(`Replace the existing map "${imported.name}"?`)) return;
-    customMaps = upsertCustomMap(customMaps, imported);
+    const parsed = JSON.parse(await file.text()) as { type?: unknown; map?: unknown; maps?: unknown };
+    const rawMaps = parsed?.type === "monochromium-custom-maps" && Array.isArray(parsed.maps)
+      ? parsed.maps
+      : parsed?.type === "monochromium-custom-map" && parsed.map
+        ? [parsed.map]
+        : null;
+    if (!rawMaps) throw new Error("This is not a Monochromium map export.");
+    const imported = sanitizeCustomMaps(rawMaps);
+    if (imported.length === 0) throw new Error("The export did not contain any valid maps.");
+    const conflicts = imported.filter((map) => customMaps.some((current) => current.id === map.id));
+    if (conflicts.length > 0 && !window.confirm(`Replace ${conflicts.length} existing custom ${conflicts.length === 1 ? "map" : "maps"}?`)) return;
+    customMaps = sanitizeCustomMaps([
+      ...customMaps.filter((current) => !imported.some((map) => map.id === current.id)),
+      ...imported,
+    ]);
+    saveCustomMaps(customMaps);
     renderMapLibrary();
+    renderPlayMapGrid();
     renderMeta();
-    addLog(`Map "${imported.name}" imported // sandbox rewards disabled.`, "good");
-    setSaveStatus(`Map "${imported.name}" imported.`, "good");
+    addLog(`${imported.length} custom ${imported.length === 1 ? "map" : "maps"} imported // sandbox rewards disabled.`, "good");
+    setSaveStatus(`${imported.length} ${imported.length === 1 ? "map" : "maps"} imported.`, "good");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid map export.";
     addLog(`Map import failed // ${message}`, "danger");
@@ -1872,9 +2136,120 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "import-enemies":
       query<HTMLInputElement>("#enemy-import-input").click();
       break;
+    case "folder-select": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      const folderId = source?.dataset["folderId"] || null;
+      if (folderId && folderId !== UNFILED_FOLDER_ID && !foldersFor(creatorFolders, kind).some((folder) => folder.id === folderId)) break;
+      closeFolderEditor(kind);
+      setActiveFolderId(kind, folderId);
+      if (kind === "modes") renderModeList();
+      else if (kind === "enemies") renderEnemyList();
+      else renderMapLibrary();
+      break;
+    }
+    case "folder-create": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      openFolderEditor(kind, "create");
+      break;
+    }
+    case "folder-rename": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      openFolderEditor(kind, "rename");
+      break;
+    }
+    case "folder-editor-cancel": {
+      const kind = source?.dataset["folderKind"];
+      if (isCreatorFolderKind(kind)) closeFolderEditor(kind);
+      break;
+    }
+    case "folder-editor-save": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind) || !(source instanceof HTMLFormElement)) break;
+      const input = source.querySelector<HTMLInputElement>("[data-folder-name]");
+      const name = input?.value.trim() ?? "";
+      if (!name) {
+        source.classList.add("invalid");
+        input?.focus();
+        setSaveStatus("Folder name cannot be empty.", "danger");
+        break;
+      }
+      const mode = source.dataset["folderEditorMode"];
+      if (mode === "rename") {
+        const folderId = source.dataset["folderId"];
+        if (!folderId) break;
+        persistCreatorFolderState(renameCreatorFolder(creatorFolders, kind, folderId, name));
+        setSaveStatus(`Folder renamed to ${name}.`, "good");
+      } else {
+        const next = createCreatorFolder(creatorFolders, kind, name);
+        const created = foldersFor(next, kind)[foldersFor(next, kind).length - 1];
+        persistCreatorFolderState(next);
+        setActiveFolderId(kind, created?.id ?? null);
+        setSaveStatus(`${name} folder created.`, "good");
+      }
+      closeFolderEditor(kind);
+      if (kind === "modes") renderModeList();
+      else if (kind === "enemies") renderEnemyList();
+      else renderMapLibrary();
+      break;
+    }
+    case "folder-delete": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      const folderId = activeFolderIdFor(kind);
+      const folder = folderId ? foldersFor(creatorFolders, kind).find((candidate) => candidate.id === folderId) : null;
+      if (!folder || !window.confirm(`Delete folder "${folder.name}"? Its children will remain in the library.`)) break;
+      closeFolderEditor(kind);
+      persistCreatorFolderState(deleteCreatorFolder(creatorFolders, kind, folder.id));
+      setActiveFolderId(kind, null);
+      if (kind === "modes") renderModeList();
+      else if (kind === "enemies") renderEnemyList();
+      else renderMapLibrary();
+      break;
+    }
+    case "folder-select-all": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      const folderId = activeFolderIdFor(kind);
+      const selected = selectedIdsFor(kind);
+      selected.clear();
+      folderAssets(kind).forEach((asset) => {
+        if (assetMatchesFolder(kind, asset.id, folderId)) selected.add(asset.id);
+      });
+      if (kind === "modes") { updateSelectedModeCount(); renderModeList(); }
+      else if (kind === "enemies") { updateSelectedEnemyCount(); renderEnemyList(); }
+      else { updateSelectedMapCount(); renderMapLibrary(); }
+      setSaveStatus(`${selected.size} ${folderTitle(kind).toLowerCase()} selected.`, "good");
+      break;
+    }
+    case "folder-move-selected": {
+      const kind = source?.dataset["folderKind"];
+      if (!isCreatorFolderKind(kind)) break;
+      const folderId = activeFolderIdFor(kind);
+      if (!folderId) break;
+      const selected = selectedIdsFor(kind);
+      if (selected.size === 0) break;
+      const destinationFolderId = folderId === UNFILED_FOLDER_ID ? null : folderId;
+      persistCreatorFolderState(assignCreatorAssets(creatorFolders, kind, [...selected], destinationFolderId));
+      if (kind === "modes") renderModeList();
+      else if (kind === "enemies") renderEnemyList();
+      else renderMapLibrary();
+      const destinationName = destinationFolderId
+        ? foldersFor(creatorFolders, kind).find((folder) => folder.id === destinationFolderId)?.name ?? "folder"
+        : "Unfiled";
+      setSaveStatus(`${selected.size} ${folderTitle(kind).toLowerCase()} moved to ${destinationName}.`, "good");
+      break;
+    }
     case "export-selected-enemies": {
       const selected = customEnemies.filter((enemy) => selectedEnemyIds.has(enemy.id));
       if (selected.length > 0) exportEnemyBundle(selected, `monochromium-enemies-${selected.length}.json`);
+      break;
+    }
+    case "export-selected-modes": {
+      const selected = customModes.filter((mode) => selectedModeIds.has(mode.id));
+      if (selected.length > 0) exportModeBundle(selected, `monochromium-modes-${selected.length}.json`);
       break;
     }
     case "export-enemy": {
@@ -1894,6 +2269,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       if (!enemy || !window.confirm(`Delete "${enemy.name}"? Custom wave references will be changed to Dummy.`)) break;
       customEnemies = customEnemies.filter((candidate) => candidate.id !== enemy.id);
       selectedEnemyIds.delete(enemy.id);
+      persistCreatorFolderState(assignCreatorAssets(creatorFolders, "enemies", [enemy.id], null));
       setCustomEnemyRegistry(customEnemies);
       saveCustomEnemies(customEnemies);
       renderEnemyList();
@@ -1984,6 +2360,8 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       const custom = customModes.find((mode) => mode.id === modeId);
       if (!custom || !window.confirm(`Delete "${custom.name}" from this browser?`)) break;
       customModes = deleteCustomMode(customModes, custom.id);
+      selectedModeIds.delete(custom.id);
+      persistCreatorFolderState(assignCreatorAssets(creatorFolders, "modes", [custom.id], null));
       if (selectedMode.kind === custom.id) selectedMode = NORMAL_MODE;
       renderModeList();
       break;
@@ -2080,10 +2458,17 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       if (map) exportMapFile(map);
       break;
     }
+    case "export-selected-maps": {
+      const selected = customMaps.filter((map) => selectedMapIds.has(map.id));
+      if (selected.length > 0) exportMapBundle(selected, `monochromium-maps-${selected.length}.json`);
+      break;
+    }
     case "delete-map": {
       const map = customMaps.find((candidate) => candidate.id === source?.dataset["mapId"]);
       if (!map || !window.confirm(`Delete "${map.name}" from this installation?`)) break;
       customMaps = deleteCustomMap(customMaps, map.id);
+      selectedMapIds.delete(map.id);
+      persistCreatorFolderState(assignCreatorAssets(creatorFolders, "maps", [map.id], null));
       if (selectedMap.kind === map.id) selectedMap = MAP_DEFINITIONS.sector07;
       renderMapLibrary();
       renderPlayMapGrid();
@@ -2171,6 +2556,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       mutateMapDraft((draft) => {
         draft.entryEdge = fresh.entryEdge;
         draft.exitEdge = fresh.exitEdge;
+        draft.mapScale = fresh.mapScale;
         draft.path = fresh.path.map((point) => ({ ...point }));
         draft.blockedZones = [];
       });
@@ -2324,6 +2710,13 @@ app.addEventListener("click", (event) => {
   runAction(actionable.dataset["action"] ?? (kind ? "select" : ""), value, actionable);
 });
 
+app.addEventListener("submit", (event) => {
+  const form = event.target as HTMLFormElement;
+  if (!form.matches(".creator-folder-editor")) return;
+  event.preventDefault();
+  runAction("folder-editor-save", undefined, form);
+});
+
 app.addEventListener("input", (event) => {
   const field = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
   const balancePath = field.dataset["balancePath"];
@@ -2346,6 +2739,11 @@ app.addEventListener("input", (event) => {
     } else if (mapField === "difficulty" && (field.value === "Easy" || field.value === "Medium" || field.value === "Hard")) {
       mapDraft.difficulty = field.value;
       return;
+    }
+    else if (mapField === "mapScale") {
+      const value = Number(field.value);
+      if (!Number.isFinite(value)) return;
+      mapDraft.mapScale = clamp(value, MAP_SCALE_MIN, MAP_SCALE_MAX);
     }
     else if (mapField === "field" || mapField === "path" || mapField === "accent") mapDraft.palette[mapField] = field.value;
     else if (mapField === "entryEdge" || mapField === "exitEdge") {
@@ -2451,6 +2849,20 @@ app.addEventListener("change", (event) => {
     updateSelectedEnemyCount();
     return;
   }
+  const modeId = field.dataset["modeSelect"];
+  if (field instanceof HTMLInputElement && modeId) {
+    if (field.checked) selectedModeIds.add(modeId);
+    else selectedModeIds.delete(modeId);
+    updateSelectedModeCount();
+    return;
+  }
+  const mapId = field.dataset["mapSelect"];
+  if (field instanceof HTMLInputElement && mapId) {
+    if (field.checked) selectedMapIds.add(mapId);
+    else selectedMapIds.delete(mapId);
+    updateSelectedMapCount();
+    return;
+  }
   if (creatorDraft && field.dataset["blockField"] === "nextBlockDelay") renderCreator();
 });
 
@@ -2469,10 +2881,12 @@ query<HTMLInputElement>("#save-import-input").addEventListener("change", async (
     setCustomEnemyRegistry(customEnemies);
     customModes = sanitizeCustomModes(parsed.customModes);
     customMaps = sanitizeCustomMaps(parsed.customMaps);
+    creatorFolders = sanitizeCreatorFolders(parsed.creatorFolders);
     cacheProgressLocally(progress);
     cacheCustomEnemiesLocally(customEnemies);
     cacheCustomModesLocally(customModes);
     cacheCustomMapsLocally(customMaps);
+    cacheCreatorFoldersLocally(creatorFolders);
     const written = await replaceDiskSave(currentSaveBundle());
     game.setAvailableTowers(progress.unlockedTowers);
     selectedMode = NORMAL_MODE;

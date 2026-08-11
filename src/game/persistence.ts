@@ -4,6 +4,7 @@ export interface SaveBundle {
   readonly customModes: unknown;
   readonly customEnemies: unknown;
   readonly customMaps: unknown;
+  readonly creatorFolders: unknown;
 }
 
 export interface DiskSaveResult {
@@ -64,7 +65,7 @@ export const loadDiskSave = async (): Promise<DiskSaveResult> => {
   }
 };
 
-export const saveDiskSection = async (section: "meta" | "custom-modes" | "custom-enemies" | "custom-maps", value: unknown): Promise<boolean> => {
+export const saveDiskSection = async (section: "meta" | "custom-modes" | "custom-enemies" | "custom-maps" | "creator-folders", value: unknown): Promise<boolean> => {
   if (desktopApi) {
     try {
       return await desktopApi.saveSection(section, value);

@@ -13,6 +13,9 @@ export const WORLD_WIDTH = 1600;
 export const WORLD_HEIGHT = 700;
 export const PATH_HALF_WIDTH = 50;
 export const RANGE_SCALE = 15;
+export const MAP_SCALE_MIN = 0.4;
+export const MAP_SCALE_MAX = 2;
+export const DEFAULT_MAP_SCALE = 1;
 
 export const PATH: readonly Point[] = [
   { x: -35, y: 360 },
@@ -36,6 +39,7 @@ export const MAP_DEFINITIONS: Record<OfficialMapKind, MapDefinition> = {
     difficulty: "Easy",
     description: "A long industrial route with generous corners and balanced build space.",
     rewardMultiplier: 1,
+    mapScale: DEFAULT_MAP_SCALE,
     path: PATH,
     core: { x: 1525, y: 500 },
     entryLabel: { x: 100, y: 424 },
@@ -51,6 +55,7 @@ export const MAP_DEFINITIONS: Record<OfficialMapKind, MapDefinition> = {
     difficulty: "Medium",
     description: "A shorter split-height route with fewer shared firing angles and riskier blocker support.",
     rewardMultiplier: 1.15,
+    mapScale: DEFAULT_MAP_SCALE,
     path: [
       { x: -35, y: 110 }, { x: 370, y: 110 }, { x: 370, y: 590 }, { x: 830, y: 590 },
       { x: 830, y: 220 }, { x: 1240, y: 220 }, { x: 1240, y: 500 }, { x: 1635, y: 500 },
@@ -69,6 +74,7 @@ export const MAP_DEFINITIONS: Record<OfficialMapKind, MapDefinition> = {
     difficulty: "Hard",
     description: "The shortest route: long isolated lanes deny loop coverage and punish late relocation.",
     rewardMultiplier: 1.3,
+    mapScale: DEFAULT_MAP_SCALE,
     path: [
       { x: -35, y: 590 }, { x: 400, y: 590 }, { x: 400, y: 110 }, { x: 1010, y: 110 },
       { x: 1010, y: 500 }, { x: 1335, y: 500 }, { x: 1335, y: 260 }, { x: 1635, y: 260 },

@@ -1,5 +1,57 @@
-import { PATH_HALF_WIDTH, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
-import type { BlockedZone, MapDefinition } from "./types.ts";
+import { DEFAULT_MAP_SCALE, MAP_SCALE_MAX, MAP_SCALE_MIN, PATH_HALF_WIDTH, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
+import { clamp } from "./math.ts";
+import type { BlockedZone, MapDefinition, Point } from "./types.ts";
+
+export interface MapWorldBounds {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export const normalizedMapScale = (value: number): number =>
+  clamp(value || DEFAULT_MAP_SCALE, MAP_SCALE_MIN, MAP_SCALE_MAX);
+
+export const mapWorldBounds = (mapScale: number): MapWorldBounds => {
+  const scale = normalizedMapScale(mapScale);
+  return {
+    x: (WORLD_WIDTH - WORLD_WIDTH * scale) / 2,
+    y: (WORLD_HEIGHT - WORLD_HEIGHT * scale) / 2,
+    width: WORLD_WIDTH * scale,
+    height: WORLD_HEIGHT * scale,
+  };
+};
+
+export const scaleMapPoint = (point: Point, mapScale: number): Point => {
+  const scale = normalizedMapScale(mapScale);
+  return {
+    x: WORLD_WIDTH / 2 + (point.x - WORLD_WIDTH / 2) * scale,
+    y: WORLD_HEIGHT / 2 + (point.y - WORLD_HEIGHT / 2) * scale,
+  };
+};
+
+/** Applies the authored map size to geometry while leaving tower/enemy art at its base world size. */
+export const scaleMapDefinition = (map: MapDefinition): MapDefinition => {
+  const scale = normalizedMapScale(map.mapScale);
+  if (scale === 1) return map;
+  return {
+    ...map,
+    path: map.path.map((point) => scaleMapPoint(point, scale)),
+    core: scaleMapPoint(map.core, scale),
+    entryLabel: scaleMapPoint(map.entryLabel, scale),
+    pathLabel: scaleMapPoint(map.pathLabel, scale),
+    blockedZones: map.blockedZones.map((zone) => {
+      const position = scaleMapPoint({ x: zone.x, y: zone.y }, scale);
+      return {
+        ...zone,
+        x: position.x,
+        y: position.y,
+        width: zone.width * scale,
+        height: zone.height * scale,
+      };
+    }),
+  };
+};
 
 export interface MapViewport {
   readonly x: number;
@@ -72,6 +124,11 @@ export const createMapPathShape = (map: MapDefinition): Path2D => {
 };
 
 export const drawMapField = (context: CanvasRenderingContext2D, map: MapDefinition): void => {
+  const scale = normalizedMapScale(map.mapScale);
+  context.save();
+  context.translate(WORLD_WIDTH / 2, WORLD_HEIGHT / 2);
+  context.scale(scale, scale);
+  context.translate(-WORLD_WIDTH / 2, -WORLD_HEIGHT / 2);
   context.fillStyle = map.palette.field;
   context.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
   const glow = context.createRadialGradient(800, 350, 20, 800, 350, 850);
@@ -101,6 +158,7 @@ export const drawMapField = (context: CanvasRenderingContext2D, map: MapDefiniti
     [1120, 566, 280, 64],
     [310, 580, 205, 48],
   ].forEach(([x = 0, y = 0, width = 0, height = 0]) => context.fillRect(x, y, width, height));
+  context.restore();
 };
 
 export const drawBlockedZone = (

@@ -12,7 +12,17 @@ import {
   WORLD_WIDTH,
 } from "./config.ts";
 import { getEnemyDefinition } from "./enemyRegistry.ts";
-import { createMapPathShape, drawMapBackdrop, drawMapCore, drawMapField, drawMapPath } from "./mapRendering.ts";
+import {
+  createMapPathShape,
+  drawMapBackdrop,
+  drawMapCore,
+  drawMapField,
+  drawMapPath,
+  mapWorldBounds,
+  normalizedMapScale,
+  scaleMapDefinition,
+  scaleMapPoint,
+} from "./mapRendering.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import type {
   Enemy,
@@ -185,7 +195,7 @@ export class Game {
   }
 
   startRun(map: MapDefinition, unlockedTowers: readonly TowerKind[], mode: ModeDefinition = NORMAL_MODE): void {
-    this.map = map;
+    this.map = scaleMapDefinition(map);
     this.path = new Polyline(this.map.path);
     this.rebuildStaticMapLayer();
     this.mode = mode;
@@ -938,9 +948,11 @@ export class Game {
   }
 
   private get viewport(): { readonly x: number; readonly y: number; readonly scale: number } {
-    // Keep the complete world visible inside the dedicated battlefield.
-    // Any remaining space becomes a frame instead of cropping map lanes.
-    const scale = Math.min(this.canvas.width / WORLD_WIDTH, this.canvas.height / WORLD_HEIGHT);
+    // Fit the world to the dedicated battlefield, then apply the map's
+    // authored zoom around the world center. Values above 1 zoom out;
+    // values below 1 zoom in and can intentionally crop the outer lanes.
+    const mapScale = normalizedMapScale(this.map.mapScale);
+    const scale = Math.min(this.canvas.width / WORLD_WIDTH, this.canvas.height / WORLD_HEIGHT) / mapScale;
     return {
       x: (this.canvas.width - WORLD_WIDTH * scale) / 2,
       y: (this.canvas.height - WORLD_HEIGHT * scale) / 2,
@@ -960,18 +972,22 @@ export class Game {
   }
 
   private rebuildStaticMapLayer(): void {
-    this.staticMapCanvas.width = WORLD_WIDTH;
-    this.staticMapCanvas.height = WORLD_HEIGHT;
+    const bounds = mapWorldBounds(this.map.mapScale);
+    this.staticMapCanvas.width = Math.max(1, Math.ceil(bounds.width));
+    this.staticMapCanvas.height = Math.max(1, Math.ceil(bounds.height));
     const context = this.staticMapCanvas.getContext("2d");
     if (!context) return;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.translate(-bounds.x, -bounds.y);
     this.mapPathShape = createMapPathShape(this.map);
     this.drawField(context);
     this.drawStaticPath(context);
   }
 
   private rebuildVignetteLayer(): void {
-    this.vignetteCanvas.width = this.canvas.width;
-    this.vignetteCanvas.height = this.canvas.height;
+    const baseScale = Math.min(this.canvas.width / WORLD_WIDTH, this.canvas.height / WORLD_HEIGHT);
+    this.vignetteCanvas.width = Math.max(1, Math.ceil(this.canvas.width / baseScale));
+    this.vignetteCanvas.height = Math.max(1, Math.ceil(this.canvas.height / baseScale));
     const context = this.vignetteCanvas.getContext("2d");
     if (!context) return;
     const centerX = this.vignetteCanvas.width / 2;
@@ -1002,7 +1018,11 @@ export class Game {
     const towerClear = this.towers.every(
       (tower) => tower.id === relocatingTower?.id || distance(tower.position, position) >= 72,
     );
-    const boundsClear = position.x > 42 && position.x < WORLD_WIDTH - 42 && position.y > 42 && position.y < WORLD_HEIGHT - 42;
+    const bounds = mapWorldBounds(this.map.mapScale);
+    const boundsClear = position.x > bounds.x + 42
+      && position.x < bounds.x + bounds.width - 42
+      && position.y > bounds.y + 42
+      && position.y < bounds.y + bounds.height - 42;
     const pathClear = !onPath || (projected.distance > 135 && projected.distance < this.path.totalLength - 135);
     const blockedClear = onPath || this.map.blockedZones.every((zone) => {
       const closestX = clamp(position.x, zone.x, zone.x + zone.width);
@@ -2441,11 +2461,12 @@ export class Game {
     const shakeX = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;
     const shakeY = this.shake > 0 ? (Math.random() - 0.5) * this.shake * 8 : 0;
     context.save();
+    const bounds = mapWorldBounds(this.map.mapScale);
     context.beginPath();
-    context.rect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    context.rect(bounds.x, bounds.y, bounds.width, bounds.height);
     context.clip();
     context.translate(shakeX, shakeY);
-    context.drawImage(this.staticMapCanvas, 0, 0);
+    context.drawImage(this.staticMapCanvas, bounds.x, bounds.y);
     this.drawPathSignal();
     this.drawCore();
     this.drawTowerRanges();
@@ -3046,9 +3067,21 @@ export class Game {
 
   private drawVignette(): void {
     const context = this.context;
+    const viewport = this.viewport;
+    const mapScale = normalizedMapScale(this.map.mapScale);
+    const vignetteOrigin = scaleMapPoint({
+      x: (WORLD_WIDTH - this.vignetteCanvas.width) / 2,
+      y: (WORLD_HEIGHT - this.vignetteCanvas.height) / 2,
+    }, mapScale);
     context.save();
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.drawImage(this.vignetteCanvas, 0, 0);
+    context.setTransform(viewport.scale, 0, 0, viewport.scale, viewport.x, viewport.y);
+    context.drawImage(
+      this.vignetteCanvas,
+      vignetteOrigin.x,
+      vignetteOrigin.y,
+      this.vignetteCanvas.width * mapScale,
+      this.vignetteCanvas.height * mapScale,
+    );
     context.restore();
   }
 }

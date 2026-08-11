@@ -1,4 +1,4 @@
-import { WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
+import { DEFAULT_MAP_SCALE, MAP_SCALE_MAX, MAP_SCALE_MIN, WORLD_HEIGHT, WORLD_WIDTH } from "./config.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import { saveDiskSection } from "./persistence.ts";
 import type { BlockedZone, CustomMapKind, MapDefinition, Point } from "./types.ts";
@@ -18,6 +18,7 @@ export interface CustomMapDraft {
   difficulty: "Easy" | "Medium" | "Hard";
   entryEdge: MapEdge;
   exitEdge: MapEdge;
+  mapScale: number;
   path: Point[];
   blockedZones: BlockedZone[];
   palette: {
@@ -96,6 +97,7 @@ export const createCustomMap = (): CustomMapDraft => ({
   difficulty: "Medium",
   entryEdge: "left",
   exitEdge: "right",
+  mapScale: DEFAULT_MAP_SCALE,
   path: [
     terminalPoint("left", 350),
     { x: 280, y: 360 },
@@ -204,6 +206,7 @@ const sanitizeMap = (value: unknown): CustomMapDraft | null => {
     difficulty: source.difficulty === "Easy" || source.difficulty === "Medium" || source.difficulty === "Hard" ? source.difficulty : "Medium",
     entryEdge,
     exitEdge,
+    mapScale: numberInRange(source.mapScale, DEFAULT_MAP_SCALE, MAP_SCALE_MIN, MAP_SCALE_MAX),
     path,
     blockedZones,
     palette: {
@@ -276,6 +279,7 @@ export const customMapToDefinition = (draft: CustomMapDraft): MapDefinition => {
     difficulty: draft.difficulty,
     description: draft.description,
     rewardMultiplier: 1,
+    mapScale: numberInRange(draft.mapScale, DEFAULT_MAP_SCALE, MAP_SCALE_MIN, MAP_SCALE_MAX),
     path: draft.path.map((point) => ({ ...point })),
     core,
     entryLabel: labelFromSample(entrySample),
