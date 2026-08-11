@@ -154,7 +154,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
 .debug-grid span { font: 600 12px "DM Mono", monospace; letter-spacing: .07em; }
 .debug-grid b { color: #969e99; font: 500 11px "DM Mono", monospace; }
 .debug-grid b.active { color: var(--gold); text-shadow: 0 0 12px rgba(241,208,122,.5); }
-.balance-lab { margin: 0 19px 19px; border: 1px solid #665e46; background: #0d1213; }
+.balance-lab { position: absolute; z-index: 45; top: 24px; left: 50%; translate: -50% 0; width: min(920px, calc(100% - 48px)); max-height: calc(100% - 48px); overflow-y: auto; margin: 0; border: 1px solid #665e46; background: rgba(9,13,14,.99); box-shadow: 0 24px 70px rgba(0,0,0,.68); animation: inspector-in .2s ease; }
 .balance-lab-head { min-height: 52px; padding: 9px 11px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #383a32; background: rgba(241,208,122,.06); }
 .balance-lab-head span { display: block; color: var(--gold); font: 600 11px "DM Mono", monospace; letter-spacing: .08em; }
 .balance-lab-head small { display: block; margin-top: 4px; color: #8d8876; font: 500 8px "DM Mono", monospace; letter-spacing: .06em; }
@@ -165,7 +165,7 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
 .balance-tower-select select:focus, .balance-field input:focus { border-color: var(--gold); }
 .balance-lab-note { margin: 0 11px 11px; color: #89928e; font: 500 9px/1.45 "DM Mono", monospace; }
 .balance-lab-note code { color: var(--gold); font: inherit; }
-.balance-fields { max-height: 300px; padding: 0 11px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; overflow-y: auto; }
+.balance-fields { max-height: min(46vh, 380px); padding: 0 11px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; overflow-y: auto; }
 .balance-field { min-width: 0; display: grid; gap: 4px; }
 .balance-lab-actions { padding: 11px; display: flex; gap: 7px; border-top: 1px solid #303836; }
 .balance-lab-actions button { flex: 1; min-height: 34px; padding: 0 8px; font-size: 9px; }
@@ -970,6 +970,8 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
   .upgrade-panel > button { width: 100%; }
   .debug-panel { top: 7px; right: 7px; width: calc(100% - 14px); }
   .debug-grid { grid-template-columns: 1fr; max-height: 55vh; overflow-y: auto; }
+  .balance-lab { top: 8px; width: calc(100% - 16px); max-height: calc(100% - 16px); }
+  .balance-fields { grid-template-columns: 1fr; max-height: 42vh; }
   .combat-dock { padding: 8px; gap: 6px; }
   .action-module { padding: 7px; }
   .combat-button { padding-inline: 7px; font-size: 10px; }

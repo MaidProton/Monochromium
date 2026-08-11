@@ -134,15 +134,16 @@ app.innerHTML = `
           <button data-action="debug-unlock"><span>UNLOCK TOWERS</span><b>PERMANENT</b></button>
           <button data-action="debug-balance" id="debug-balance-button" hidden><span>TOWER BALANCE LAB</span><b>LIVE + SAVE TO CONFIG</b></button>
         </div>
-        <section class="balance-lab" id="balance-lab" hidden>
-          <div class="balance-lab-head"><div><span>TOWER BALANCE LAB</span><small>DEVELOPMENT ONLY // CHANGES APPLY LIVE</small></div><button data-action="debug-balance-close" aria-label="Close tower balance lab">×</button></div>
-          <label class="balance-tower-select"><span>TOWER</span><select id="balance-tower-kind">${TOWER_ORDER.map((kind) => `<option value="${kind}">${TOWER_DEFINITIONS[kind].name.toUpperCase()}</option>`).join("")}</select></label>
-          <p class="balance-lab-note">Edit numeric combat, deployment, level, upgrade, and ability values. Input changes apply to the current dev run immediately. SAVE TO CONFIG writes them into <code>src/game/config.ts</code>.</p>
-          <div class="balance-fields" id="balance-fields"></div>
-          <div class="balance-lab-actions"><button class="secondary-button" data-action="debug-balance-reset">RESET FORM</button><button class="primary-button" data-action="debug-balance-save">SAVE TO CONFIG</button></div>
-          <small class="balance-lab-status" id="balance-lab-status"></small>
-        </section>
       </aside>
+
+      <section class="balance-lab" id="balance-lab" hidden>
+        <div class="balance-lab-head"><div><span>TOWER BALANCE LAB</span><small>DEVELOPMENT ONLY // CHANGES APPLY LIVE</small></div><button data-action="debug-balance-close" aria-label="Close tower balance lab">×</button></div>
+        <label class="balance-tower-select"><span>TOWER</span><select id="balance-tower-kind">${TOWER_ORDER.map((kind) => `<option value="${kind}">${TOWER_DEFINITIONS[kind].name.toUpperCase()}</option>`).join("")}</select></label>
+        <p class="balance-lab-note">Edit numeric combat, deployment, level, upgrade, and ability values. Input changes apply to the current dev run immediately. SAVE TO CONFIG writes them into <code>src/game/config.ts</code>.</p>
+        <div class="balance-fields" id="balance-fields"></div>
+        <div class="balance-lab-actions"><button class="secondary-button" data-action="debug-balance-reset">RESET FORM</button><button class="primary-button" data-action="debug-balance-save">SAVE TO CONFIG</button></div>
+        <small class="balance-lab-status" id="balance-lab-status"></small>
+      </section>
 
       <div class="menu-screen main-menu" id="main-menu">
         <div class="onboarding-kicker">MONOCHROMIUM // COMMAND</div>
@@ -765,6 +766,7 @@ const applyBalanceDraft = (): void => {
 
 const openBalanceLab = (): void => {
   if (!developmentBuild) return;
+  debugPanel.hidden = true;
   balanceDraft = cloneTowerDefinition(balanceKind);
   balanceLab.hidden = false;
   renderBalanceLab();
@@ -2242,6 +2244,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       break;
     case "debug-balance-close":
       balanceLab.hidden = true;
+      debugPanel.hidden = false;
       break;
     case "debug-balance-reset":
       balanceDraft = cloneTowerDefinition(balanceKind);
