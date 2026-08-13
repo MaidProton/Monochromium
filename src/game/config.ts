@@ -881,7 +881,7 @@ export const TOWER_DEFINITIONS: Record<TowerKind, TowerDefinition> = {
     hiddenDetectionLevel: 3,
     onPath: {
       title: "Shield Line",
-      description: "A cheap melee blocker whose broad sword arc controls tightly packed enemies.",
+      description: "A cheap melee blocker whose focused sword strikes stop one engaged enemy at a time.",
       hp: 125,
       maxAggro: 3,
     },
@@ -901,7 +901,7 @@ export const TOWER_DEFINITIONS: Record<TowerKind, TowerDefinition> = {
       { level: 1, cost: 300, title: "Broadsword", onPathSkill: "+2 damage.", offPathSkill: "+2 damage." },
       { level: 2, cost: 700, title: "Sharpness", onPathSkill: "+3 damage, +1 range, and regenerates 7% max HP every 7s.", offPathSkill: "+3 damage, +1 range, and regenerates 7% max HP every 7s." },
       { level: 3, cost: 1200, title: "Ethereal Blade", onPathSkill: "+6 damage and hidden detection.", offPathSkill: "+6 damage and hidden detection." },
-      { level: 4, cost: 3500, title: "Warrior Spirit", onPathSkill: "+12 damage, delayed Double Strike, and an arrival AoE slash after moving.", offPathSkill: "+12 damage, delayed Double Strike, and an arrival AoE slash after moving." },
+      { level: 4, cost: 3500, title: "Warrior Spirit", onPathSkill: "+12 damage, delayed single-target Double Strike, and an arrival AoE slash after moving.", offPathSkill: "+12 damage, delayed single-target Double Strike, and an arrival AoE slash after moving." },
     ],
   },
 };

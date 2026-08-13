@@ -68,7 +68,7 @@ import {
   scaleMapPoint,
 } from "./game/mapRendering.ts";
 import { clamp, distance, Polyline } from "./game/math.ts";
-import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, unlockEveryTower, unlockTower } from "./game/meta.ts";
+import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, toggleTowerLoadout, unlockEveryTower, unlockTower } from "./game/meta.ts";
 import { getDesktopEnvironment, hasDiskSaveApi, loadDiskSave, replaceDiskSave, type SaveBundle } from "./game/persistence.ts";
 import {
   assignCreatorAssets,
@@ -177,8 +177,8 @@ app.innerHTML = `
 
       <div class="menu-screen main-menu" id="main-menu">
         <div class="onboarding-kicker">MONOCHROMIUM // COMMAND</div>
-        <h1>Every contact<br><em>must matter.</em></h1>
-        <p>Choose a battlefield, survive finite modes, and expand your permanent construct roster.</p>
+        <h1>Monochromium<br><em>Tower Defense</em></h1>
+        <p>In this world, it's to boop or to be booped <span class="boop-smile">=)</span></p>
         <div class="meta-wallet" aria-label="Persistent currencies">
           <div><span>COINS</span><strong id="meta-coins">0</strong></div>
           <div><span>TOKENS</span><strong id="meta-tokens">0</strong></div>
@@ -469,7 +469,12 @@ app.innerHTML = `
           <div><div class="onboarding-kicker">PERMANENT ARMORY</div><h2>TOWER SHOP</h2></div>
           <div class="meta-wallet compact"><div><span>COINS</span><strong id="shop-coins">0</strong></div><div><span>TOKENS</span><strong id="shop-tokens">0</strong></div></div>
         </div>
-        <p>Purchased towers remain unlocked in this browser. Towers currently use Coins only.</p>
+        <p>Purchase towers permanently, then equip up to five for each battle. Your active loadout controls deployment and hotkeys.</p>
+        <section class="loadout-panel" aria-label="Active tower loadout">
+          <div class="loadout-heading"><div><span>ACTIVE LOADOUT</span><small>THESE TOWERS ENTER BATTLE</small></div><strong id="loadout-count">1 / 5</strong></div>
+          <div class="loadout-slots" id="loadout-slots"></div>
+          <small class="loadout-note" id="loadout-note">Equip towers from the armory below.</small>
+        </section>
         <div class="shop-grid">
           ${TOWER_ORDER.map((kind) => {
             const tower = TOWER_DEFINITIONS[kind];
@@ -532,27 +537,8 @@ app.innerHTML = `
 
     <div class="bottom-hud">
       <div class="build-dock">
-        <div class="dock-label"><span>DEPLOY</span><small>1—0</small></div>
-        <div class="tower-list" id="tower-list">
-        ${TOWER_ORDER.map((kind) => TOWER_DEFINITIONS[kind])
-          .map(
-            (tower, index) => `
-              <button class="tower-card" data-kind="${tower.kind}" data-testid="tower-${tower.kind}">
-                <span class="hotkey">${index === 9 ? "0" : index + 1}</span>
-                <span class="tower-glyph" style="--accent:${tower.accent};--dim:${tower.dimAccent}">${tower.glyph}</span>
-                <span class="tower-copy">
-                  <strong>${tower.name}</strong>
-                  <small>${tower.onPath.title} / ${tower.offPath.title}</small>
-                </span>
-                <span class="cost-stack">
-                  <small class="stock-count" id="stock-${tower.kind}">x${tower.copyLimit}</small>
-                  <span class="cost">$${tower.cost}</span>
-                </span>
-              </button>
-            `,
-          )
-          .join("")}
-        </div>
+        <div class="dock-label"><span>LOADOUT</span><small>1—5</small></div>
+        <div class="tower-list" id="tower-list"></div>
       </div>
       <div class="wave-controls">
         <span id="enemy-count">NO HOSTILES</span>
@@ -614,6 +600,10 @@ let balanceDraft: TowerDefinition | null = null;
 let selectionSignature = "";
 let inspectorSuppressed = false;
 let lastSelectedTowerId: number | null = null;
+let battleLoadoutSignature = "";
+const LOADOUT_VISUAL_ORDER = [3, 1, 0, 2, 4] as const;
+
+const loadoutIndexForDisplaySlot = (displaySlot: number): number => LOADOUT_VISUAL_ORDER[displaySlot - 1] ?? -1;
 let progress = loadProgress();
 let selectedMap: MapDefinition = MAP_DEFINITIONS.sector07;
 let activeMap: MapDefinition = MAP_DEFINITIONS.sector07;
@@ -933,14 +923,34 @@ const renderMeta = (): void => {
   query<HTMLElement>("#meta-tokens").textContent = progress.tokens.toLocaleString();
   query<HTMLElement>("#shop-coins").textContent = progress.coins.toLocaleString();
   query<HTMLElement>("#shop-tokens").textContent = progress.tokens.toLocaleString();
+  query<HTMLElement>("#loadout-count").textContent = `${progress.loadout.length} / 5`;
+  query<HTMLElement>("#loadout-slots").innerHTML = Array.from({ length: 5 }, (_, index) => {
+    const kind = progress.loadout[index];
+    if (!kind) return `<div class="loadout-slot empty"><span>${index + 1}</span><small>EMPTY SLOT</small></div>`;
+    const tower = TOWER_DEFINITIONS[kind];
+    return `<div class="loadout-slot filled" style="--accent:${tower.accent};--dim:${tower.dimAccent}"><span class="loadout-slot-number">${index + 1}</span><b>${tower.glyph}</b><strong>${tower.name}</strong></div>`;
+  }).join("");
+  query<HTMLElement>("#loadout-note").textContent = progress.loadout.length >= 5
+    ? "Loadout full // toggle an equipped tower below to make room."
+    : `${5 - progress.loadout.length} loadout ${5 - progress.loadout.length === 1 ? "slot" : "slots"} available.`;
   TOWER_ORDER.forEach((kind) => {
     const card = query<HTMLButtonElement>(`[data-tower-kind='${kind}']`);
     const owned = progress.unlockedTowers.includes(kind);
+    const equipped = progress.loadout.includes(kind);
     const cost = TOWER_DEFINITIONS[kind].unlockCost;
     card.classList.toggle("owned", owned);
+    card.classList.toggle("equipped", equipped);
     card.classList.toggle("unaffordable", !owned && progress.coins < cost);
-    card.disabled = owned;
-    query<HTMLElement>(`#shop-price-${kind}`).textContent = owned ? "OWNED" : `${cost.toLocaleString()} COINS`;
+    card.disabled = !owned && progress.coins < cost;
+    card.dataset["action"] = owned ? "toggle-loadout" : "buy-tower";
+    card.title = !owned
+      ? `Unlock ${TOWER_DEFINITIONS[kind].name} for ${cost.toLocaleString()} Coins`
+      : equipped
+        ? "Remove from active loadout"
+        : progress.loadout.length >= 5
+          ? "Loadout full // remove another tower first"
+          : "Equip for the next battle";
+    query<HTMLElement>(`#shop-price-${kind}`).textContent = owned ? equipped ? "EQUIPPED" : "EQUIP" : `${cost.toLocaleString()} COINS`;
   });
   query<HTMLElement>("#creator-mode-count").textContent = customModes.length.toString();
   query<HTMLElement>("#creator-enemy-count").textContent = customEnemies.length.toString();
@@ -1738,6 +1748,32 @@ const renderSelection = (state: GameUiState): void => {
   panel.scrollTop = previousScroll;
 };
 
+const renderBattleLoadout = (state: GameUiState): void => {
+  const signature = state.availableTowers.join("|");
+  if (signature === battleLoadoutSignature) return;
+  battleLoadoutSignature = signature;
+  const towerList = query<HTMLElement>("#tower-list");
+  towerList.innerHTML = state.availableTowers.map((kind, index) => {
+    const tower = TOWER_DEFINITIONS[kind];
+    const displaySlot = LOADOUT_VISUAL_ORDER.indexOf(index as (typeof LOADOUT_VISUAL_ORDER)[number]) + 1;
+    return `<button class="tower-card" data-kind="${tower.kind}" data-loadout-slot="${index}" data-testid="tower-${tower.kind}" style="--accent:${tower.accent};--dim:${tower.dimAccent}" aria-label="Slot ${displaySlot}: ${tower.name}, $${tower.cost}">
+      <span class="hotkey">${displaySlot}</span>
+      <span class="tower-glyph">${tower.glyph}</span>
+      <strong class="tower-name">${tower.name}</strong>
+      <span class="tower-cost">$${tower.cost}</span>
+      <small class="stock-count" id="stock-${tower.kind}">x${tower.copyLimit}</small>
+    </button>`;
+  }).join("") + Array.from({ length: Math.max(0, 5 - state.availableTowers.length) }, (_, index) =>
+    (() => {
+      const loadoutIndex = state.availableTowers.length + index;
+      const displaySlot = LOADOUT_VISUAL_ORDER.indexOf(loadoutIndex as (typeof LOADOUT_VISUAL_ORDER)[number]) + 1;
+      return `<div class="tower-card empty" data-loadout-slot="${loadoutIndex}" aria-label="Empty loadout slot ${displaySlot}"><span class="hotkey">${displaySlot}</span><span class="tower-glyph">+</span><strong class="tower-name">EMPTY</strong></div>`;
+    })(),
+  ).join("");
+  query<HTMLElement>(".dock-label span").textContent = "LOADOUT";
+  query<HTMLElement>(".dock-label small").textContent = "1—5";
+};
+
 const render = (state: GameUiState): void => {
   const selectedId = state.selectedTower?.tower.id ?? null;
   if (selectedId !== lastSelectedTowerId) {
@@ -1814,10 +1850,9 @@ const render = (state: GameUiState): void => {
     : state.waveActive
       ? `WAVE ACTIVE <b>${state.enemiesRemaining}</b>`
       : `NEXT WAVE <b>${Math.max(0, Math.ceil(state.intermissionRemaining))}</b>`;
-  document.querySelectorAll<HTMLButtonElement>(".tower-card").forEach((card) => {
+  renderBattleLoadout(state);
+  document.querySelectorAll<HTMLButtonElement>(".tower-card[data-kind]").forEach((card) => {
     const kind = card.dataset["kind"] as TowerKind;
-    const available = state.availableTowers.includes(kind);
-    card.hidden = !available;
     const remaining = state.copiesRemaining[kind];
     card.classList.toggle("active", kind === state.selectedKind);
     card.classList.toggle("unaffordable", !state.infiniteCash && TOWER_DEFINITIONS[kind].cost > state.shards);
@@ -1957,7 +1992,7 @@ const game = new Game(canvas, {
   },
 });
 
-game.setAvailableTowers(progress.unlockedTowers);
+game.setAvailableTowers(progress.loadout);
 renderMeta();
 
 const hydrateDiskPersistence = async (): Promise<void> => {
@@ -1983,7 +2018,7 @@ const hydrateDiskPersistence = async (): Promise<void> => {
     cacheCustomMapsLocally(customMaps);
     cacheCreatorFoldersLocally(creatorFolders);
     await replaceDiskSave(currentSaveBundle());
-    game.setAvailableTowers(progress.unlockedTowers);
+    game.setAvailableTowers(progress.loadout);
     renderMeta();
     renderModeList();
     renderMapLibrary();
@@ -2098,7 +2133,7 @@ const enterRun = (map: MapDefinition, mode: ModeDefinition, test: boolean): void
   [mainMenu, creatorHub, enemySelection, enemyCreator, modeSelection, mapSelection, mapLibrary, mapCreator, modeCreator, towerShop, gameOverPanel, victoryPanel]
     .forEach((screen) => { screen.hidden = true; });
   shell.classList.add("run-active");
-  game.startRun(activeMap, progress.unlockedTowers, activeMode);
+  game.startRun(activeMap, progress.loadout, activeMode);
 };
 
 const runAction = (action: string, value?: string, source?: HTMLElement): void => {
@@ -2598,8 +2633,21 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       if (value) {
         const kind = value as TowerKind;
         if (unlockTower(progress, kind)) {
-          game.setAvailableTowers(progress.unlockedTowers);
-          addLog(`${TOWER_DEFINITIONS[kind].name} permanently unlocked.`, "good");
+          game.setAvailableTowers(progress.loadout);
+          addLog(`${TOWER_DEFINITIONS[kind].name} permanently unlocked${progress.loadout.includes(kind) ? " and equipped" : ""}.`, "good");
+        }
+        renderMeta();
+      }
+      break;
+    case "toggle-loadout":
+      if (value) {
+        const kind = value as TowerKind;
+        const result = toggleTowerLoadout(progress, kind);
+        if (result === "equipped" || result === "unequipped") {
+          game.setAvailableTowers(progress.loadout);
+          addLog(`${TOWER_DEFINITIONS[kind].name} ${result === "equipped" ? "equipped to" : "removed from"} the active loadout.`, "good");
+        } else if (result === "full") {
+          addLog("Loadout full // remove an equipped tower before adding another.", "danger");
         }
         renderMeta();
       }
@@ -2661,7 +2709,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       break;
     case "debug-unlock":
       unlockEveryTower(progress);
-      game.setAvailableTowers(progress.unlockedTowers);
+      game.setAvailableTowers(progress.loadout);
       renderMeta();
       addLog("Debug // every tower permanently unlocked.", "good");
       break;
@@ -2888,7 +2936,7 @@ query<HTMLInputElement>("#save-import-input").addEventListener("change", async (
     cacheCustomMapsLocally(customMaps);
     cacheCreatorFoldersLocally(creatorFolders);
     const written = await replaceDiskSave(currentSaveBundle());
-    game.setAvailableTowers(progress.unlockedTowers);
+    game.setAvailableTowers(progress.loadout);
     selectedMode = NORMAL_MODE;
     selectedMap = MAP_DEFINITIONS.sector07;
     renderMeta();
@@ -2950,9 +2998,12 @@ window.addEventListener("keydown", (event) => {
       selectedPill.hidden = false;
     }
   }
-  else if (["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].includes(event.key)) {
-    const kind = TOWER_ORDER[event.key === "0" ? 9 : Number(event.key) - 1];
-    if (kind) game.selectKind(kind);
+  else if (["1", "2", "3", "4", "5"].includes(event.key)) {
+    const kind = progress.loadout[loadoutIndexForDisplaySlot(Number(event.key))];
+    if (kind) {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      game.selectKind(kind);
+    }
   }
 });
 

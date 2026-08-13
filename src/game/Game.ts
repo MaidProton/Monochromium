@@ -88,10 +88,7 @@ interface TimedBomb {
 
 interface DelayedSlash {
   readonly towerId: number;
-  readonly origin: Point;
-  readonly aim: Point;
-  readonly range: number;
-  readonly spread: number;
+  readonly targetId: number;
   readonly damage: number;
   readonly color: string;
   timer: number;
@@ -115,6 +112,15 @@ const mixHexColors = (start: string, end: string, amount: number): string => {
   if (!from || !to) return start;
   const channel = (index: number): number => Math.round(from[index]! + (to[index]! - from[index]!) * clamp(amount, 0, 1));
   return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+};
+
+const colorWithAlpha = (color: string, alpha: number): string => {
+  const match = /^#([0-9a-f]{6})$/i.exec(color);
+  if (!match?.[1]) return color;
+  const red = Number.parseInt(match[1].slice(0, 2), 16);
+  const green = Number.parseInt(match[1].slice(2, 4), 16);
+  const blue = Number.parseInt(match[1].slice(4, 6), 16);
+  return `rgba(${red}, ${green}, ${blue}, ${clamp(alpha, 0, 1)})`;
 };
 
 export class Game {
@@ -200,7 +206,6 @@ export class Game {
     this.rebuildStaticMapLayer();
     this.mode = mode;
     this.availableTowerKinds = new Set(unlockedTowers);
-    this.availableTowerKinds.add("bandit");
     this.maxIntegrity = this.mode.coreIntegrity;
     this.restart();
     this.callbacks.onLog(
@@ -230,7 +235,6 @@ export class Game {
 
   setAvailableTowers(unlockedTowers: readonly TowerKind[]): void {
     this.availableTowerKinds = new Set(unlockedTowers);
-    this.availableTowerKinds.add("bandit");
     this.emitUi();
   }
 
@@ -264,7 +268,7 @@ export class Game {
     this.waveElapsed = 0;
     this.selectedTowerId = null;
     this.relocatingTowerId = null;
-    this.selectedKind = "bandit";
+    this.selectedKind = [...this.availableTowerKinds][0] ?? null;
     this.gameOver = false;
     this.modeComplete = false;
     this.paused = false;
@@ -1500,6 +1504,13 @@ export class Game {
       const stats = this.towerStats(tower);
       const damage = stats.damage * tower.damageBuff;
       const range = stats.range * RANGE_SCALE;
+      if (tower.kind === "cyborg" && stats.ammo !== undefined && tower.ammo < stats.ammo && tower.idleTimer >= 5) {
+        tower.ammo = stats.ammo;
+        tower.fireTimer = Math.max(tower.fireTimer, stats.reload ?? 2);
+        tower.attackRamp = 0;
+        tower.idleTimer = 0;
+        this.spawnText(tower.position, "IDLE RELOAD", definition.dimAccent);
+      }
       // Pathbound placement adds blocking, HP, aggro, and a counter. It never
       // replaces the tower's normal targeting or ranged/area attack behavior.
       const candidates = this.enemies.filter(
@@ -1566,6 +1577,7 @@ export class Game {
             });
           }
           tower.rocketTimer = 8;
+          tower.idleTimer = 0;
           this.spawnText(tower.position, "JETSTREAM x3", definition.accent);
         }
       }
@@ -1626,10 +1638,21 @@ export class Game {
           const reactorHowitzer = tower.level >= 4 && tower.shotCounter % howitzerInterval === 0;
           const isHowitzer = magazineFinal || reactorHowitzer;
           const shotDamage = damage * (isHowitzer ? 10 : 1);
-          this.projectiles.push({
-            position: { ...tower.position }, delay: 0, targetId: target.id, damage: shotDamage, kind: tower.kind,
-            speed: 620, splash: isHowitzer ? 46 : 0, chain: 0, towerLevel: tower.level,
-          });
+          const impact = this.enemyPosition(target);
+          this.damageEnemy(target, shotDamage, definition.accent);
+          this.spawnCyborgBeam(tower.position, impact, definition.accent, isHowitzer ? 7 : 3.6);
+          if (isHowitzer) {
+            this.spawnExplosion(impact, definition.accent, 46);
+            this.enemies
+              .filter(
+                (enemy) =>
+                  enemy.id !== target.id &&
+                  enemy.hp > 0 &&
+                  this.canTowerTarget(tower, enemy) &&
+                  distance(this.enemyPosition(enemy), impact) <= 46,
+              )
+              .forEach((enemy) => this.damageEnemy(enemy, shotDamage, definition.accent));
+          } else this.spawnSpark(impact, definition.accent, 20);
           if (isHowitzer) this.spawnText(tower.position, "HOWITZER", definition.accent);
           tower.idleTimer = 0;
           if (tower.level >= 3) tower.attackRamp = Math.min(1, tower.attackRamp + 0.08);
@@ -1758,16 +1781,12 @@ export class Game {
         }
         case "warrior": {
           const impact = this.enemyPosition(target);
-          const victims = this.enemiesInCone(tower.position, impact, candidates, range, 0.72);
-          victims.forEach((enemy) => this.damageEnemy(enemy, damage, definition.accent));
-          this.spawnSlash(tower.position, impact, definition.accent, range, 0.72);
+          this.damageEnemy(target, damage, definition.accent);
+          this.spawnSwordStrike(impact, definition.accent);
           if (tower.level >= 4) {
             this.delayedSlashes.push({
               towerId: tower.id,
-              origin: { ...tower.position },
-              aim: { ...impact },
-              range,
-              spread: 0.72,
+              targetId: target.id,
               damage,
               color: "#ffffff",
               timer: 0.18,
@@ -1869,7 +1888,9 @@ export class Game {
   }
 
   private selectTarget(tower: Tower, candidates: readonly Enemy[]): Enemy | undefined {
-    return [...candidates].sort((a, b) => {
+    const aggroed = candidates.filter((enemy) => tower.engaged.has(enemy.id) || enemy.targetTowerId === tower.id);
+    const prioritizedCandidates = aggroed.length > 0 ? aggroed : candidates;
+    return [...prioritizedCandidates].sort((a, b) => {
       switch (tower.targeting) {
         case "first":
           return b.pathDistance - a.pathDistance || a.id - b.id;
@@ -1949,16 +1970,11 @@ export class Game {
         continue;
       }
       const tower = this.towers.find((candidate) => candidate.id === slash.towerId && candidate.hp > 0);
-      this.spawnSlash(slash.origin, slash.aim, slash.color, slash.range * 0.9, slash.spread);
-      if (!tower) continue;
-      const candidates = this.enemies.filter(
-        (enemy) =>
-          enemy.hp > 0 &&
-          this.canTowerTarget(tower, enemy) &&
-          distance(slash.origin, this.enemyPosition(enemy)) <= slash.range,
-      );
-      this.enemiesInCone(slash.origin, slash.aim, candidates, slash.range, slash.spread)
-        .forEach((enemy) => this.damageEnemy(enemy, slash.damage, slash.color));
+      const target = this.enemies.find((enemy) => enemy.id === slash.targetId && enemy.hp > 0);
+      if (!tower || !target || !this.canTowerTarget(tower, target)) continue;
+      const impact = this.enemyPosition(target);
+      this.damageEnemy(target, slash.damage, slash.color);
+      this.spawnSwordStrike(impact, slash.color);
       this.audio.shoot(260);
     }
     this.delayedSlashes = survivors;
@@ -2114,7 +2130,7 @@ export class Game {
       pendingCasualtyRefund: this.pendingCasualtyRefund,
       infiniteCash: this.infiniteCash,
       copiesRemaining: { ...this.copiesRemaining },
-      availableTowers: TOWER_ORDER.filter((kind) => this.availableTowerKinds.has(kind)),
+      availableTowers: [...this.availableTowerKinds],
       wave: this.waveNumber,
       totalWaves: this.mode.waves.length,
       modeName: this.mode.name,
@@ -2229,6 +2245,22 @@ export class Game {
       type: "slash",
     });
     this.spawnImpactDust(to, color);
+  }
+
+  private spawnSwordStrike(position: Point, color: string): void {
+    const life = 0.2;
+    this.particles.push({
+      position: { ...position },
+      velocity: { x: 0, y: 0 },
+      life,
+      maxLife: life,
+      color,
+      size: 4.5,
+      angle: Math.random() * TAU,
+      length: 86,
+      type: "strike",
+    });
+    this.spawnImpactDust(position, color);
   }
 
   private spawnTracer(from: Point, to: Point, color: string): void {
@@ -2391,19 +2423,32 @@ export class Game {
     for (let index = 0; index < 5; index += 1) this.spawnSpark(muzzle, color, 55 + Math.random() * 70);
   }
 
-  private spawnBeam(from: Point, to: Point, color: string, width: number, delay = 0): void {
+  private spawnBeam(
+    from: Point,
+    to: Point,
+    color: string,
+    width: number,
+    delay = 0,
+    startColor?: string,
+    life = 0.13,
+  ): void {
     this.particles.push({
       position: { ...from },
       velocity: { x: 0, y: 0 },
       delay,
-      life: 0.13,
-      maxLife: 0.13,
+      life,
+      maxLife: life,
       color,
+      startColor,
       size: width,
       angle: Math.atan2(to.y - from.y, to.x - from.x),
       length: distance(from, to),
       type: "beam",
     });
+  }
+
+  private spawnCyborgBeam(from: Point, to: Point, color: string, width: number): void {
+    this.spawnBeam(from, to, colorWithAlpha(color, 0.78), width, 0, colorWithAlpha(color, 0.08), 0.08);
   }
 
   private spawnSmoke(position: Point, color = "#626866", count = 8): void {
@@ -2980,6 +3025,33 @@ export class Game {
         context.arc(particle.position.x, particle.position.y, radius * 0.72, start + 0.09, end - 0.09);
         context.lineWidth = Math.max(1, particle.size * 0.35 * alpha);
         context.stroke();
+      } else if (particle.type === "strike") {
+        const angle = particle.angle ?? -0.72;
+        const growth = clamp(progress * 3.2, 0, 1);
+        const length = 12 + ((particle.length ?? 86) - 12) * growth;
+        const halfLength = length / 2;
+        const direction = { x: Math.cos(angle), y: Math.sin(angle) };
+        const start = {
+          x: particle.position.x - direction.x * halfLength,
+          y: particle.position.y - direction.y * halfLength,
+        };
+        const end = {
+          x: particle.position.x + direction.x * halfLength,
+          y: particle.position.y + direction.y * halfLength,
+        };
+        context.globalAlpha = alpha;
+        context.lineCap = "round";
+        context.shadowBlur = 13 * alpha;
+        context.shadowColor = displayColor;
+        context.beginPath();
+        context.moveTo(start.x, start.y);
+        context.lineTo(end.x, end.y);
+        context.lineWidth = Math.max(1.5, particle.size * (0.45 + growth * 0.85) * alpha);
+        context.stroke();
+        context.globalAlpha = alpha * 0.7;
+        context.strokeStyle = "#ffffff";
+        context.lineWidth = Math.max(0.75, particle.size * (0.14 + growth * 0.28) * alpha);
+        context.stroke();
       } else if (particle.type === "spray") {
         context.translate(particle.position.x, particle.position.y);
         context.rotate(particle.rotation ?? 0);
@@ -3014,18 +3086,27 @@ export class Game {
         const angle = particle.angle ?? 0;
         const endX = particle.position.x + Math.cos(angle) * (particle.length ?? 0);
         const endY = particle.position.y + Math.sin(angle) * (particle.length ?? 0);
-        context.globalCompositeOperation = "lighter";
+        const taperedBeam = Boolean(particle.startColor);
+        const beamGradient = particle.startColor
+          ? context.createLinearGradient(particle.position.x, particle.position.y, endX, endY)
+          : null;
+        if (beamGradient && particle.startColor) {
+          beamGradient.addColorStop(0, particle.startColor);
+          beamGradient.addColorStop(1, displayColor);
+        }
+        context.globalCompositeOperation = taperedBeam ? "source-over" : "lighter";
         context.lineCap = "round";
-        context.shadowBlur = 12;
+        context.shadowBlur = taperedBeam ? 0 : 12;
         context.shadowColor = displayColor;
+        context.strokeStyle = beamGradient ?? displayColor;
         context.beginPath();
         context.moveTo(particle.position.x, particle.position.y);
         context.lineTo(endX, endY);
         context.lineWidth = Math.max(1, particle.size * alpha);
         context.stroke();
-        context.globalAlpha = alpha * 0.7;
-        context.strokeStyle = "#ffffff";
-        context.lineWidth = Math.max(0.75, particle.size * 0.3 * alpha);
+        context.globalAlpha = alpha * (taperedBeam ? 0.45 : 0.7);
+        context.strokeStyle = taperedBeam ? displayColor : "#ffffff";
+        context.lineWidth = Math.max(0.75, particle.size * (taperedBeam ? 0.26 : 0.3) * alpha);
         context.stroke();
       } else if (particle.type === "lightning") {
         const points = particle.points ?? [];

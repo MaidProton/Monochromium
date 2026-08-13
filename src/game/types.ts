@@ -216,10 +216,11 @@ export interface Particle {
   rotation?: number;
   readonly angularVelocity?: number;
   readonly drag?: number;
+  readonly startColor?: string;
   readonly endColor?: string;
   readonly length?: number;
   readonly points?: readonly Point[];
-  readonly type: "spark" | "ring" | "slash" | "text" | "spray" | "smoke" | "flash" | "beam" | "lightning";
+  readonly type: "spark" | "ring" | "slash" | "strike" | "text" | "spray" | "smoke" | "flash" | "beam" | "lightning";
   readonly text?: string;
 }
 
