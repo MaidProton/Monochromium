@@ -12,6 +12,7 @@ import type {
 export const WORLD_WIDTH = 1600;
 export const WORLD_HEIGHT = 700;
 export const PATH_HALF_WIDTH = 50;
+export const DEFAULT_MULTIPLAYER_HIT_CASH_MULTIPLIER = 0.75;
 export const RANGE_SCALE = 15;
 export const MAP_SCALE_MIN = 0.4;
 export const MAP_SCALE_MAX = 2;
@@ -950,6 +951,7 @@ export const NORMAL_MODE: ModeDefinition = {
   description: "A finite 25-wave introductory campaign culminating in the Big Dummy.",
   startingCash: 500,
   coreIntegrity: 12,
+  multiplayerHitCashMultiplier: DEFAULT_MULTIPLAYER_HIT_CASH_MULTIPLIER,
   reward: { coins: 160, tokens: 2 },
   waves: NORMAL_MODE_WAVES,
 };

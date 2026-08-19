@@ -25,11 +25,18 @@ import {
 } from "./mapRendering.ts";
 import { clamp, distance, Polyline } from "./math.ts";
 import type {
+  MultiplayerCommand,
+  MultiplayerGameSnapshot,
+  MultiplayerPlayer,
+  MultiplayerRole,
+} from "./multiplayer.ts";
+import type {
   Enemy,
   EnemyKind,
   MapDefinition,
   ModeDefinition,
   Particle,
+  PlayerId,
   PlacementPreview,
   Point,
   Projectile,
@@ -65,6 +72,11 @@ export interface GameUiState {
   readonly started: boolean;
   readonly gameOver: boolean;
   readonly modeComplete: boolean;
+  readonly multiplayer: boolean;
+  readonly mirror: boolean;
+  readonly localPlayerId: PlayerId;
+  readonly selectedOwned: boolean;
+  readonly teammates: readonly { readonly id: PlayerId; readonly username: string; readonly color: string; readonly shards: number }[];
 }
 
 interface GameCallbacks {
@@ -72,6 +84,8 @@ interface GameCallbacks {
   readonly onLog: (message: string, tone?: "neutral" | "good" | "danger") => void;
   readonly onGameOver: (wave: number) => void;
   readonly onVictory: (mode: ModeDefinition) => void;
+  readonly onCursor?: (point: Point | null) => void;
+  readonly onCommand?: (command: MultiplayerCommand) => void;
 }
 
 interface TimedBomb {
@@ -79,7 +93,8 @@ interface TimedBomb {
   readonly damage: number;
   readonly radius: number;
   readonly color: string;
-  readonly ownerId?: number;
+  readonly playerId: PlayerId;
+  readonly sourceTowerId?: number;
   readonly sourceKind?: TowerKind;
   readonly proximity?: boolean;
   readonly towerLevel?: number;
@@ -94,8 +109,22 @@ interface DelayedSlash {
   timer: number;
 }
 
+interface PlayerRuntime {
+  shards: number;
+  pendingCasualtyRefund: number;
+  damageIncomeRemainder: number;
+  copiesRemaining: Record<TowerKind, number>;
+}
+
+interface RemoteCursor {
+  readonly player: MultiplayerPlayer;
+  point: Point | null;
+  updatedAt: number;
+}
+
 const TAU = Math.PI * 2;
 const WAVE_INTERMISSION_SECONDS = 3;
+const SOLO_PLAYER_ID = "solo";
 
 const mixHexColors = (start: string, end: string, amount: number): string => {
   const parse = (color: string): [number, number, number] | null => {
@@ -130,7 +159,7 @@ export class Game {
   private mapPathShape = new Path2D();
   private map: MapDefinition = MAP_DEFINITIONS.sector07;
   private path = new Polyline(this.map.path);
-  private readonly audio = new AudioSystem();
+  private readonly audio: AudioSystem;
   private readonly callbacks: GameCallbacks;
   private mode: ModeDefinition = NORMAL_MODE;
 
@@ -157,12 +186,15 @@ export class Game {
   private intermissionTimer = 0;
   private integrity = this.mode.coreIntegrity;
   private maxIntegrity = this.mode.coreIntegrity;
-  private shards = this.mode.startingCash;
-  private pendingCasualtyRefund = 0;
   private infiniteCash = false;
-  private damageIncomeRemainder = 0;
   private availableTowerKinds = new Set<TowerKind>(["bandit"]);
-  private copiesRemaining = this.freshTowerStock();
+  private readonly playerRuntimes = new Map<PlayerId, PlayerRuntime>();
+  private playerProfiles = new Map<PlayerId, MultiplayerPlayer>();
+  private localPlayerId: PlayerId = SOLO_PLAYER_ID;
+  private multiplayerRole: MultiplayerRole | null = null;
+  private remoteCursor: RemoteCursor | null = null;
+  private lastSnapshotSequence = -1;
+  private readonly mirrorEnemyTargets = new Map<number, number>();
   private tempestPlacementTriggered = false;
   private paused = false;
   private speed = 1;
@@ -175,6 +207,7 @@ export class Game {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     callbacks: GameCallbacks,
+    audio = new AudioSystem(),
   ) {
     const context = canvas.getContext("2d");
     if (!context) throw new Error("Canvas 2D is not supported by this browser.");
@@ -182,6 +215,7 @@ export class Game {
     this.staticMapCanvas = document.createElement("canvas");
     this.vignetteCanvas = document.createElement("canvas");
     this.callbacks = callbacks;
+    this.audio = audio;
     this.rebuildStaticMapLayer();
     this.bindInput();
     this.resize();
@@ -198,6 +232,70 @@ export class Game {
     return Object.fromEntries(
       TOWER_ORDER.map((kind) => [kind, TOWER_DEFINITIONS[kind].copyLimit]),
     ) as Record<TowerKind, number>;
+  }
+
+  private createPlayerRuntime(): PlayerRuntime {
+    return {
+      shards: this.mode.startingCash,
+      pendingCasualtyRefund: 0,
+      damageIncomeRemainder: 0,
+      copiesRemaining: this.freshTowerStock(),
+    };
+  }
+
+  private runtimeFor(playerId: PlayerId): PlayerRuntime {
+    let runtime = this.playerRuntimes.get(playerId);
+    if (!runtime) {
+      runtime = this.createPlayerRuntime();
+      this.playerRuntimes.set(playerId, runtime);
+    }
+    return runtime;
+  }
+
+  private get localRuntime(): PlayerRuntime { return this.runtimeFor(this.localPlayerId); }
+  private get shards(): number { return this.localRuntime.shards; }
+  private set shards(value: number) { this.localRuntime.shards = value; }
+  private get pendingCasualtyRefund(): number { return this.localRuntime.pendingCasualtyRefund; }
+  private set pendingCasualtyRefund(value: number) { this.localRuntime.pendingCasualtyRefund = value; }
+  private get copiesRemaining(): Record<TowerKind, number> { return this.localRuntime.copiesRemaining; }
+  private set copiesRemaining(value: Record<TowerKind, number>) { this.localRuntime.copiesRemaining = value; }
+  private get isMirror(): boolean { return this.multiplayerRole === "guest"; }
+  private get multiplayerActive(): boolean { return this.multiplayerRole !== null; }
+
+  configureMultiplayer(role: MultiplayerRole, localPlayer: MultiplayerPlayer, players: readonly MultiplayerPlayer[]): void {
+    this.multiplayerRole = role;
+    this.localPlayerId = localPlayer.id;
+    this.playerProfiles = new Map(players.map((player) => [player.id, player]));
+    if (!this.playerProfiles.has(localPlayer.id)) this.playerProfiles.set(localPlayer.id, localPlayer);
+    this.availableTowerKinds = new Set(localPlayer.loadout);
+    this.playerRuntimes.clear();
+    this.playerProfiles.forEach((_player, id) => this.playerRuntimes.set(id, this.createPlayerRuntime()));
+    this.remoteCursor = null;
+    this.lastSnapshotSequence = -1;
+    this.emitUi();
+  }
+
+  updateMultiplayerPlayers(players: readonly MultiplayerPlayer[]): void {
+    if (!this.multiplayerActive) return;
+    players.forEach((player) => {
+      this.playerProfiles.set(player.id, player);
+      this.runtimeFor(player.id);
+    });
+    this.emitUi();
+  }
+
+  clearMultiplayer(): void {
+    this.multiplayerRole = null;
+    this.localPlayerId = SOLO_PLAYER_ID;
+    this.playerProfiles.clear();
+    this.playerRuntimes.clear();
+    this.remoteCursor = null;
+    this.lastSnapshotSequence = -1;
+    this.emitUi();
+  }
+
+  setRemoteCursor(player: MultiplayerPlayer, point: Point | null): void {
+    this.remoteCursor = { player, point, updatedAt: performance.now() };
   }
 
   startRun(map: MapDefinition, unlockedTowers: readonly TowerKind[], mode: ModeDefinition = NORMAL_MODE): void {
@@ -230,11 +328,16 @@ export class Game {
     this.selectedTowerId = null;
     this.relocatingTowerId = null;
     this.placement = null;
+    this.audio.stopAmbience();
     this.emitUi();
   }
 
   setAvailableTowers(unlockedTowers: readonly TowerKind[]): void {
     this.availableTowerKinds = new Set(unlockedTowers);
+    this.emitUi();
+  }
+
+  refreshAudioState(): void {
     this.emitUi();
   }
 
@@ -255,11 +358,13 @@ export class Game {
     this.delayedSlashes = [];
     this.spawnQueue = [];
     this.integrity = this.maxIntegrity;
-    this.shards = this.mode.startingCash;
-    this.pendingCasualtyRefund = 0;
+    if (!this.multiplayerActive) {
+      this.localPlayerId = SOLO_PLAYER_ID;
+      this.playerRuntimes.clear();
+    }
+    const playerIds = this.multiplayerActive ? [...this.playerProfiles.keys()] : [this.localPlayerId];
+    playerIds.forEach((playerId) => this.playerRuntimes.set(playerId, this.createPlayerRuntime()));
     this.infiniteCash = false;
-    this.damageIncomeRemainder = 0;
-    this.copiesRemaining = this.freshTowerStock();
     this.tempestPlacementTriggered = false;
     this.waveNumber = 0;
     this.nextWaveIndex = 0;
@@ -273,6 +378,7 @@ export class Game {
     this.modeComplete = false;
     this.paused = false;
     this.started = true;
+    this.audio.startAmbience(0.12);
     this.callbacks.onLog("Timeline restored. Core integrity nominal.", "good");
     this.emitUi();
   }
@@ -313,12 +419,13 @@ export class Game {
     if (!this.started || this.waveActive || this.intermissionTimer > 0 || this.gameOver || this.modeComplete) return;
     const definition = this.mode.waves[this.nextWaveIndex];
     if (!definition) return;
-    if (this.pendingCasualtyRefund > 0) {
-      const recovered = this.pendingCasualtyRefund;
-      this.pendingCasualtyRefund = 0;
-      this.shards += recovered;
-      this.callbacks.onLog(`Casualty recovery arrived // +$${recovered}.`, "good");
-    }
+    let totalRecovered = 0;
+    this.playerRuntimes.forEach((runtime) => {
+      totalRecovered += runtime.pendingCasualtyRefund;
+      runtime.shards += runtime.pendingCasualtyRefund;
+      runtime.pendingCasualtyRefund = 0;
+    });
+    if (totalRecovered > 0) this.callbacks.onLog(`Casualty recovery arrived // $${totalRecovered} distributed to tower owners.`, "good");
     this.waveNumber = this.nextWaveIndex + 1;
     const queuedEnemies: Array<{ kind: EnemyKind; spawnAt: number }> = [];
     if (definition.blocks) {
@@ -350,20 +457,32 @@ export class Game {
     this.waveActive = true;
     this.callbacks.onLog(`Wave ${this.waveNumber.toString().padStart(2, "0")} // breach signatures detected.`, "danger");
     if (definition.message) this.callbacks.onLog(definition.message, "danger");
-    this.audio.tone(155, 0.18, 0.028, 90);
+    this.audio.waveStart();
+    this.audio.setAmbienceIntensity(0.28);
     this.emitUi();
   }
 
   togglePause(): void {
     if (!this.started || this.gameOver) return;
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "pause" });
+      return;
+    }
     this.paused = !this.paused;
     this.callbacks.onLog(this.paused ? "Simulation suspended." : "Simulation resumed.");
+    this.audio.setAmbienceIntensity(this.paused ? 0.05 : this.waveActive ? 0.28 : 0.12);
+    this.audio.uiPause(this.paused);
     this.emitUi();
   }
 
   cycleSpeed(): void {
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "speed" });
+      return;
+    }
     this.speed = this.speed === 1 ? 1.5 : this.speed === 1.5 ? 2 : 1;
     this.callbacks.onLog(`Simulation clock set to ${this.speed}×.`);
+    this.audio.uiSpeed(this.speed);
     this.emitUi();
   }
 
@@ -374,24 +493,31 @@ export class Game {
   }
 
   toggleInfiniteCash(): void {
+    if (this.multiplayerActive) {
+      this.callbacks.onLog("Debug commands are disabled during multiplayer.", "danger");
+      return;
+    }
     this.infiniteCash = !this.infiniteCash;
     this.callbacks.onLog(`Debug // infinite cash ${this.infiniteCash ? "enabled" : "disabled"}.`, "good");
     this.emitUi();
   }
 
   debugAddCash(amount = 1000): void {
+    if (this.multiplayerActive) return;
     this.shards += amount;
     this.callbacks.onLog(`Debug // +$${amount.toLocaleString()} cash.`, "good");
     this.emitUi();
   }
 
   debugHealCore(): void {
+    if (this.multiplayerActive) return;
     this.integrity = this.maxIntegrity;
     this.callbacks.onLog("Debug // core integrity restored.", "good");
     this.emitUi();
   }
 
   debugClearWave(): void {
+    if (this.multiplayerActive) return;
     this.towers.forEach((tower) => tower.engaged.clear());
     this.enemies = [];
     this.projectiles = [];
@@ -405,12 +531,14 @@ export class Game {
   }
 
   debugRestock(): void {
+    if (this.multiplayerActive) return;
     this.copiesRemaining = this.freshTowerStock();
     this.callbacks.onLog("Debug // all deployment stock restored.", "good");
     this.emitUi();
   }
 
   debugMaxSelected(): void {
+    if (this.multiplayerActive) return;
     const tower = this.selectedTower;
     if (!tower) {
       this.callbacks.onLog("Debug // select a tower first.", "danger");
@@ -449,12 +577,16 @@ export class Game {
 
   sellSelected(): void {
     const tower = this.selectedTower;
-    if (!tower || this.gameOver) return;
+    if (!tower || this.gameOver || tower.ownerId !== this.localPlayerId) return;
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "sell", towerId: tower.id });
+      return;
+    }
     const refundRate = tower.kind === "cyborg" && tower.level >= 5 ? 0.8 : 0.5;
     const refund = Math.floor(tower.totalInvested * refundRate);
     this.releaseTowerEnemies(tower);
     this.towers = this.towers.filter((candidate) => candidate.id !== tower.id);
-    this.timedBombs = this.timedBombs.filter((bomb) => bomb.ownerId !== tower.id);
+    this.timedBombs = this.timedBombs.filter((bomb) => bomb.sourceTowerId !== tower.id);
     this.shards += refund;
     this.selectedTowerId = null;
     if (this.relocatingTowerId === tower.id) this.relocatingTowerId = null;
@@ -465,7 +597,11 @@ export class Game {
 
   upgradeSelected(): void {
     const tower = this.selectedTower;
-    if (!tower || this.gameOver) return;
+    if (!tower || this.gameOver || tower.ownerId !== this.localPlayerId) return;
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "upgrade", towerId: tower.id });
+      return;
+    }
     const definition = TOWER_DEFINITIONS[tower.kind];
     const upgrade = definition.upgrades[tower.level];
     if (!upgrade) return;
@@ -497,13 +633,13 @@ export class Game {
     this.spawnRing(tower.position, definition.accent, 0.7, 8);
     this.spawnText(tower.position, `LEVEL ${tower.level} // ${upgrade.title.toUpperCase()}`, definition.accent);
     this.callbacks.onLog(`${definition.name} upgraded to level ${tower.level} // ${upgrade.title} unlocked.`, "good");
-    this.audio.counter();
+    this.audio.towerUpgrade();
     this.emitUi();
   }
 
   startMoveSelected(): void {
     const tower = this.selectedTower;
-    if (!tower || this.gameOver) return;
+    if (!tower || this.gameOver || tower.ownerId !== this.localPlayerId) return;
     if (!this.infiniteCash && this.shards < ECONOMY_RULES.relocationCost) {
       this.callbacks.onLog(`Insufficient cash // $${ECONOMY_RULES.relocationCost} required to relocate.`, "danger");
       this.audio.fail();
@@ -513,23 +649,31 @@ export class Game {
     this.relocatingTowerId = tower.id;
     this.updatePlacement();
     this.callbacks.onLog(`Relocating ${TOWER_DEFINITIONS[tower.kind].name} // choose any valid path or field site.`);
-    this.audio.tone(360, 0.08, 0.014, 80);
+    this.audio.tone(360, 0.08, 0.014, 80, "ui");
     this.emitUi();
   }
 
   setSelectedTargeting(targeting: TargetingMode): void {
     const tower = this.selectedTower;
-    if (!tower || tower.targeting === targeting) return;
+    if (!tower || tower.ownerId !== this.localPlayerId || tower.targeting === targeting) return;
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "target", towerId: tower.id, targeting });
+      return;
+    }
     tower.targeting = targeting;
     this.callbacks.onLog(`${TOWER_DEFINITIONS[tower.kind].name} target priority // ${targeting.toUpperCase()}.`);
-    this.audio.tone(410, 0.06, 0.012, 60);
+    this.audio.tone(410, 0.06, 0.012, 60, "ui");
     this.emitUi();
   }
 
   counterSelected(): void {
     const tower = this.selectedTower;
-    if (!tower || this.gameOver || this.paused) {
+    if (!tower || tower.ownerId !== this.localPlayerId || this.gameOver || this.paused) {
       this.audio.fail();
+      return;
+    }
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "counter", towerId: tower.id });
       return;
     }
     if (tower.stunTimer > 0) {
@@ -583,8 +727,12 @@ export class Game {
 
   activateSelectedAbility(): void {
     const tower = this.selectedTower;
-    if (!tower || this.gameOver || this.paused) {
+    if (!tower || tower.ownerId !== this.localPlayerId || this.gameOver || this.paused) {
       this.audio.fail();
+      return;
+    }
+    if (this.isMirror) {
+      this.callbacks.onCommand?.({ type: "ability", towerId: tower.id });
       return;
     }
     const ability = TOWER_DEFINITIONS[tower.kind].ability;
@@ -649,7 +797,7 @@ export class Game {
         const shots = tower.level >= 3 ? 2 : 1;
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
-          this.damageEnemy(enemy, damage * shots, accent);
+          this.damageEnemy(enemy, damage * shots, accent, tower.ownerId);
           this.spawnMuzzleFlash(tower.position, impact, "#fff3bd", 20);
           this.spawnBeam(tower.position, impact, accent, 4);
           this.spawnImpactDust(impact, accent);
@@ -662,7 +810,7 @@ export class Game {
         const victims = this.enemies.filter(
           (enemy) => enemy.targetTowerId === tower.id && this.canTowerTarget(tower, enemy),
         );
-        victims.forEach((enemy) => this.damageEnemy(enemy, damage * (tower.level >= 4 ? 3 : 2), accent));
+        victims.forEach((enemy) => this.damageEnemy(enemy, damage * (tower.level >= 4 ? 3 : 2), accent, tower.ownerId));
         const aim = victims[0] ? this.enemyPosition(victims[0]) : { x: tower.position.x + 90, y: tower.position.y };
         this.spawnCrossSlash(tower.position, aim, accent, stats.range * RANGE_SCALE);
         this.spawnBeam(
@@ -691,7 +839,7 @@ export class Game {
         const rounds = stats.ammo ? Math.min(stats.ammo, 8) : 8;
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
-          this.damageEnemy(enemy, damage * rounds, accent);
+          this.damageEnemy(enemy, damage * rounds, accent, tower.ownerId);
           for (let round = 0; round < Math.min(rounds, 6); round += 1) {
             this.spawnBeam(tower.position, impact, round % 2 === 0 ? accent : "#ffffff", 2.5, round * 0.025);
           }
@@ -706,7 +854,7 @@ export class Game {
         const victims = this.enemies.filter((enemy) => enemy.targetTowerId === tower.id && this.canTowerTarget(tower, enemy));
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
-          this.damageEnemy(enemy, damage * 2, accent);
+          this.damageEnemy(enemy, damage * 2, accent, tower.ownerId);
           this.spawnMuzzleFlash(tower.position, impact, "#fff1b5", 19);
           this.spawnBeam(tower.position, impact, accent, 4);
           this.spawnRing(impact, accent, 0.34, 3, 24);
@@ -720,7 +868,7 @@ export class Game {
           (enemy) => this.canTowerTarget(tower, enemy) && distance(tower.position, this.enemyPosition(enemy)) <= range,
         );
         victims.forEach((enemy) => {
-          this.damageEnemy(enemy, Math.max(2, damage * 3), accent);
+          this.damageEnemy(enemy, Math.max(2, damage * 3), accent, tower.ownerId);
           this.applyBurn(enemy, tower, 1.5);
         });
         this.spawnRadialSpray(tower.position, "#ffe66d", "#ed352f", 46, range);
@@ -739,7 +887,7 @@ export class Game {
                 this.canTowerTarget(tower, candidate) &&
                 distance(this.enemyPosition(candidate), impact) <= 72,
             )
-            .forEach((candidate) => this.damageEnemy(candidate, Math.max(20, damage * 5), accent));
+            .forEach((candidate) => this.damageEnemy(candidate, Math.max(20, damage * 5), accent, tower.ownerId));
           this.spawnExplosion(impact, accent, 72);
         });
         break;
@@ -750,7 +898,7 @@ export class Game {
         );
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
-          this.damageEnemy(enemy, damage * 5, accent);
+          this.damageEnemy(enemy, damage * 5, accent, tower.ownerId);
           for (let pellet = 0; pellet < 5; pellet += 1) {
             this.spawnBeam(tower.position, impact, pellet === 2 ? "#ffffff" : accent, 2.4, pellet * 0.025);
           }
@@ -772,7 +920,7 @@ export class Game {
         const spacing = tower.level >= 5 ? 0.1 : 0.2;
         victims.forEach((enemy) => {
           const impact = this.enemyPosition(enemy);
-          this.damageEnemy(enemy, damage * burst, accent);
+          this.damageEnemy(enemy, damage * burst, accent, tower.ownerId);
           for (let shot = 0; shot < burst; shot += 1) {
             this.spawnBeam(tower.position, impact, shot % 2 === 0 ? accent : "#ffffff", 2.2, shot * spacing);
           }
@@ -792,7 +940,7 @@ export class Game {
             this.canTowerTarget(tower, enemy) &&
             distance(tower.position, this.enemyPosition(enemy)) <= stats.range * RANGE_SCALE,
         );
-        victims.forEach((enemy) => this.damageEnemy(enemy, damage * (tower.level >= 4 ? 4 : 2), accent));
+        victims.forEach((enemy) => this.damageEnemy(enemy, damage * (tower.level >= 4 ? 4 : 2), accent, tower.ownerId));
         const aim = victims[0] ? this.enemyPosition(victims[0]) : { x: tower.position.x + 1, y: tower.position.y };
         this.spawnCrossSlash(tower.position, aim, accent, stats.range * RANGE_SCALE);
         this.spawnShieldFlash(tower.position, accent, stats.range * RANGE_SCALE);
@@ -820,7 +968,7 @@ export class Game {
             distance(this.enemyPosition(enemy), tower.position) <= stats.range * RANGE_SCALE,
         )
         .forEach((enemy) => {
-          this.damageEnemy(enemy, stats.damage * 10, definition.accent);
+          this.damageEnemy(enemy, stats.damage * 10, definition.accent, tower.ownerId);
           this.spawnSlash(
             tower.position,
             this.enemyPosition(enemy),
@@ -835,7 +983,7 @@ export class Game {
       this.spawnText(tower.position, "BLADE STANCE", definition.accent);
     }
     this.callbacks.onLog(`Samurai drew the blade // 15 seconds of active combat.`, "good");
-    this.audio.counter();
+    this.audio.towerAbility(tower.kind);
   }
 
   private activateOnslaught(tower: Tower): void {
@@ -859,7 +1007,7 @@ export class Game {
     this.spawnRing(tower.position, TOWER_DEFINITIONS.mercenary.accent, 0.8, 8, radius);
     this.spawnText(tower.position, `ONSLAUGHT +${Math.round((buff - 1) * 100)}%`, TOWER_DEFINITIONS.mercenary.accent);
     this.callbacks.onLog(`Mercenary activated Onslaught // nearby towers gain ${Math.round((buff - 1) * 100)}% damage.`, "good");
-    this.audio.counter();
+    this.audio.towerAbility(tower.kind);
   }
 
   private activateTimeBomb(tower: Tower): void {
@@ -886,6 +1034,7 @@ export class Game {
       damage: 500 * tower.damageBuff,
       radius: 105,
       color: TOWER_DEFINITIONS.bomber.accent,
+      playerId: tower.ownerId,
       sourceKind: tower.kind,
       towerLevel: tower.level,
       timer: 5,
@@ -894,20 +1043,23 @@ export class Game {
     this.spawnTracer(tower.position, position, TOWER_DEFINITIONS.bomber.accent);
     this.spawnText(position, "TIME BOMB // 5", TOWER_DEFINITIONS.bomber.accent);
     this.callbacks.onLog("Bomber planted a Time Bomb // detonation in 5 seconds.", "danger");
-    this.audio.tone(180, 0.16, 0.025, -40);
+    this.audio.tone(180, 0.16, 0.025, -40, "towers");
   }
 
   private bindInput(): void {
     this.canvas.addEventListener("pointermove", (event) => {
       this.pointer = this.eventToWorld(event);
+      this.callbacks.onCursor?.(this.pointer);
       this.updatePlacement();
     });
     this.canvas.addEventListener("pointerleave", () => {
       this.pointer = null;
+      this.callbacks.onCursor?.(null);
       this.placement = null;
       this.emitUi();
     });
     this.canvas.addEventListener("pointerdown", (event) => {
+      void this.audio.unlock();
       if (event.button === 2) {
         this.cancelPlacement();
         return;
@@ -915,6 +1067,13 @@ export class Game {
       if (event.button !== 0 || !this.started || this.gameOver) return;
       const point = this.eventToWorld(event);
       if (this.relocatingTowerId !== null && this.placement) {
+        if (this.isMirror) {
+          this.callbacks.onCommand?.({ type: "relocate", towerId: this.relocatingTowerId, position: this.placement.position });
+          this.relocatingTowerId = null;
+          this.placement = null;
+          this.emitUi();
+          return;
+        }
         this.relocateTower(this.placement);
         return;
       }
@@ -927,11 +1086,18 @@ export class Game {
         this.relocatingTowerId = null;
         hitTower.selectedPulse = 1;
         this.placement = null;
-        this.audio.tone(420, 0.05, 0.012, 40);
+        this.audio.tone(420, 0.05, 0.012, 40, "ui");
         this.emitUi();
         return;
       }
-      if (this.selectedKind && this.placement) this.deploy(this.selectedKind, this.placement);
+      if (this.selectedKind && this.placement) {
+        if (this.isMirror) {
+          this.callbacks.onCommand?.({ type: "deploy", kind: this.selectedKind, position: this.placement.position });
+          this.selectedKind = null;
+          this.placement = null;
+          this.emitUi();
+        } else this.deploy(this.selectedKind, this.placement);
+      }
       else {
         this.selectedTowerId = null;
         this.emitUi();
@@ -1016,11 +1182,15 @@ export class Game {
       this.placement = null;
       return;
     }
-    const projected = this.path.closest(this.pointer);
+    this.placement = this.placementAt(this.pointer, relocatingTower?.id);
+  }
+
+  private placementAt(point: Point, relocatingTowerId?: number): PlacementPreview {
+    const projected = this.path.closest(point);
     const onPath = projected.offset <= PATH_HALF_WIDTH;
-    const position = onPath ? projected.point : this.pointer;
+    const position = onPath ? projected.point : point;
     const towerClear = this.towers.every(
-      (tower) => tower.id === relocatingTower?.id || distance(tower.position, position) >= 72,
+      (tower) => tower.id === relocatingTowerId || distance(tower.position, position) >= 72,
     );
     const bounds = mapWorldBounds(this.map.mapScale);
     const boundsClear = position.x > bounds.x + 42
@@ -1033,7 +1203,7 @@ export class Game {
       const closestY = clamp(position.y, zone.y, zone.y + zone.height);
       return Math.hypot(position.x - closestX, position.y - closestY) >= 34;
     });
-    this.placement = {
+    return {
       position,
       onPath,
       valid: towerClear && boundsClear && pathClear && blockedClear,
@@ -1080,7 +1250,7 @@ export class Game {
       `${definition.name} relocated as ${form} // ${this.infiniteCash ? "debug override" : `-$${ECONOMY_RULES.relocationCost}`}.`,
       "good",
     );
-    this.audio.deploy();
+    this.audio.deploy(tower.kind);
     this.emitUi();
   }
 
@@ -1106,6 +1276,7 @@ export class Game {
     if (!levelStats) return;
     const tower: Tower = {
       id: this.nextId++,
+      ownerId: this.localPlayerId,
       kind,
       position: placement.position,
       onPath: placement.onPath,
@@ -1151,7 +1322,7 @@ export class Game {
     this.placement = null;
     const form = placement.onPath ? definition.onPath.title : definition.offPath.title;
     this.callbacks.onLog(`${definition.name} deployed as ${form} // ${this.copiesRemaining[kind]} copies remain.`, "good");
-    this.audio.deploy();
+    this.audio.deploy(kind);
     this.spawnRing(tower.position, definition.accent, 0.45, 5);
     if (kind === "tempest") {
       if (!this.tempestPlacementTriggered) {
@@ -1160,7 +1331,7 @@ export class Game {
           (enemy) => this.canTowerTarget(tower, enemy) && distance(this.enemyPosition(enemy), tower.position) <= 150,
         );
         nearby.forEach((enemy) => {
-          this.damageEnemy(enemy, 200, definition.accent);
+          this.damageEnemy(enemy, 200, definition.accent, tower.ownerId);
           this.spawnArc(tower.position, this.enemyPosition(enemy), definition.accent);
           enemy.slowTimer = Math.max(enemy.slowTimer, 4);
           enemy.slowFactor = Math.min(enemy.slowFactor, 0.5);
@@ -1172,6 +1343,187 @@ export class Game {
     this.emitUi();
   }
 
+  applyMultiplayerCommand(playerId: PlayerId, command: MultiplayerCommand): boolean {
+    if (this.multiplayerRole !== "host" || !this.playerProfiles.has(playerId) || this.gameOver || this.modeComplete) return false;
+    if (!command || typeof command !== "object" || typeof command.type !== "string") return false;
+    if (command.type === "pause") {
+      this.togglePause();
+      return true;
+    }
+    if (command.type === "speed") {
+      this.cycleSpeed();
+      return true;
+    }
+    const profile = this.playerProfiles.get(playerId);
+    if (!profile) return false;
+    if (command.type === "deploy") {
+      if (!Object.hasOwn(TOWER_DEFINITIONS, command.kind) || !profile.loadout.includes(command.kind)) return false;
+      if (!Number.isFinite(command.position?.x) || !Number.isFinite(command.position?.y)) return false;
+      const placement = this.placementAt(command.position);
+      return this.withPlayer(playerId, null, () => this.deploy(command.kind, placement));
+    }
+    const tower = this.towers.find((candidate) => candidate.id === command.towerId && candidate.ownerId === playerId);
+    if (!tower) return false;
+    return this.withPlayer(playerId, tower.id, () => {
+      if (command.type === "relocate") {
+        if (!Number.isFinite(command.position?.x) || !Number.isFinite(command.position?.y)) return;
+        this.relocatingTowerId = tower.id;
+        this.relocateTower(this.placementAt(command.position, tower.id));
+      } else if (command.type === "sell") this.sellSelected();
+      else if (command.type === "upgrade") this.upgradeSelected();
+      else if (command.type === "target" && ["first", "last", "strongest", "weakest", "closest"].includes(command.targeting)) this.setSelectedTargeting(command.targeting);
+      else if (command.type === "counter") this.counterSelected();
+      else if (command.type === "ability") this.activateSelectedAbility();
+    });
+  }
+
+  private withPlayer(playerId: PlayerId, towerId: number | null, action: () => void): boolean {
+    const previousPlayerId = this.localPlayerId;
+    const previousSelectedTowerId = this.selectedTowerId;
+    const previousSelectedKind = this.selectedKind;
+    const previousRelocatingTowerId = this.relocatingTowerId;
+    this.localPlayerId = playerId;
+    this.selectedTowerId = towerId;
+    try {
+      action();
+      return true;
+    } finally {
+      this.localPlayerId = previousPlayerId;
+      this.selectedTowerId = previousSelectedTowerId;
+      this.selectedKind = previousSelectedKind;
+      this.relocatingTowerId = previousRelocatingTowerId;
+      this.emitUi();
+    }
+  }
+
+  createMultiplayerSnapshot(sequence: number): MultiplayerGameSnapshot | null {
+    if (this.multiplayerRole !== "host" || !this.started) return null;
+    return {
+      sequence,
+      sentAt: performance.now(),
+      integrity: this.integrity,
+      maxIntegrity: this.maxIntegrity,
+      wave: this.waveNumber,
+      waveActive: this.waveActive,
+      intermissionRemaining: this.intermissionTimer,
+      nextWaveIndex: this.nextWaveIndex,
+      paused: this.paused,
+      speed: this.speed,
+      started: this.started,
+      gameOver: this.gameOver,
+      modeComplete: this.modeComplete,
+      players: [...this.playerRuntimes].map(([id, runtime]) => ({
+        id,
+        shards: runtime.shards,
+        pendingCasualtyRefund: runtime.pendingCasualtyRefund,
+        copiesRemaining: { ...runtime.copiesRemaining },
+      })),
+      towers: this.towers.map((tower) => ({ ...tower, position: { ...tower.position }, engaged: [...tower.engaged] })),
+      enemies: this.enemies.map((enemy) => ({ ...enemy })),
+      projectiles: this.projectiles.map((projectile) => ({ ...projectile, position: { ...projectile.position } })),
+      particles: this.particles.slice(-180).map((particle) => ({
+        ...particle,
+        position: { ...particle.position },
+        velocity: { ...particle.velocity },
+        points: particle.points?.map((point) => ({ ...point })),
+      })),
+      timedBombs: this.timedBombs.map((bomb) => ({ ...bomb, position: { ...bomb.position } })),
+      spawnQueue: this.spawnQueue.map((spawn) => ({ ...spawn })),
+    };
+  }
+
+  applyMultiplayerSnapshot(snapshot: MultiplayerGameSnapshot): boolean {
+    const finitePoint = (point: Point | undefined): boolean => Boolean(point && Number.isFinite(point.x) && Number.isFinite(point.y));
+    if (
+      !this.isMirror || !snapshot || !Number.isSafeInteger(snapshot.sequence) || snapshot.sequence <= this.lastSnapshotSequence ||
+      !Array.isArray(snapshot.players) || snapshot.players.length > 2 ||
+      !Array.isArray(snapshot.towers) || snapshot.towers.length > 100 ||
+      !Array.isArray(snapshot.enemies) || snapshot.enemies.length > 5_000 ||
+      !Array.isArray(snapshot.projectiles) || snapshot.projectiles.length > 10_000 ||
+      !Array.isArray(snapshot.particles) || snapshot.particles.length > 200 ||
+      !Array.isArray(snapshot.timedBombs) || snapshot.timedBombs.length > 1_000 ||
+      !Array.isArray(snapshot.spawnQueue) || snapshot.spawnQueue.length > 5_000 ||
+      !Number.isFinite(snapshot.integrity) || !Number.isFinite(snapshot.maxIntegrity) || !Number.isFinite(snapshot.wave) || !Number.isFinite(snapshot.intermissionRemaining) ||
+      snapshot.players.some((player) => !this.playerProfiles.has(player.id) || !Number.isFinite(player.shards) || !Number.isFinite(player.pendingCasualtyRefund) || !player.copiesRemaining || TOWER_ORDER.some((kind) => !Number.isFinite(player.copiesRemaining[kind]))) ||
+      snapshot.towers.some((tower) => !this.playerProfiles.has(tower.ownerId) || !Object.hasOwn(TOWER_DEFINITIONS, tower.kind) || !finitePoint(tower.position) || !Array.isArray(tower.engaged)) ||
+      snapshot.enemies.some((enemy) => typeof enemy.kind !== "string" || !Number.isFinite(enemy.pathDistance) || !Number.isFinite(enemy.hp)) ||
+      snapshot.projectiles.some((projectile) => !this.playerProfiles.has(projectile.ownerId) || !finitePoint(projectile.position)) ||
+      snapshot.particles.some((particle) => !finitePoint(particle.position) || !finitePoint(particle.velocity)) ||
+      snapshot.timedBombs.some((bomb) => !this.playerProfiles.has(bomb.playerId) || !finitePoint(bomb.position))
+    ) return false;
+    this.lastSnapshotSequence = snapshot.sequence;
+    const previousEnemies = new Map(this.enemies.map((enemy) => [enemy.id, enemy]));
+    const previousEnemyIds = new Set(previousEnemies.keys());
+    const previousProjectileCount = this.projectiles.length;
+    const previousWaveActive = this.waveActive;
+    const previousGameOver = this.gameOver;
+    const previousModeComplete = this.modeComplete;
+    this.integrity = snapshot.integrity;
+    this.maxIntegrity = snapshot.maxIntegrity;
+    this.waveNumber = snapshot.wave;
+    this.waveActive = snapshot.waveActive;
+    this.intermissionTimer = snapshot.intermissionRemaining;
+    this.nextWaveIndex = snapshot.nextWaveIndex;
+    this.paused = snapshot.paused;
+    this.speed = snapshot.speed;
+    this.started = snapshot.started;
+    this.gameOver = snapshot.gameOver;
+    this.modeComplete = snapshot.modeComplete;
+    snapshot.players.forEach((player) => {
+      const runtime = this.runtimeFor(player.id);
+      runtime.shards = Math.max(0, player.shards);
+      runtime.pendingCasualtyRefund = Math.max(0, player.pendingCasualtyRefund);
+      runtime.copiesRemaining = { ...player.copiesRemaining };
+    });
+    this.towers = snapshot.towers.map((tower) => ({ ...tower, position: { ...tower.position }, engaged: new Set(tower.engaged) }));
+    this.enemies = snapshot.enemies.map((enemy) => {
+      const previous = previousEnemies.get(enemy.id);
+      this.mirrorEnemyTargets.set(enemy.id, enemy.pathDistance);
+      return { ...enemy, pathDistance: previous?.pathDistance ?? enemy.pathDistance };
+    });
+    this.enemies.filter((enemy) => !previousEnemyIds.has(enemy.id)).slice(0, 3).forEach((enemy) => {
+      const definition = getEnemyDefinition(enemy.kind);
+      this.audio.enemySpawn(enemy.kind, Boolean(definition.boss));
+    });
+    previousEnemies.forEach((enemy, id) => {
+      if (!this.enemies.some((candidate) => candidate.id === id)) this.audio.enemyDeath(Boolean(getEnemyDefinition(enemy.kind).boss));
+    });
+    const activeEnemyIds = new Set(this.enemies.map((enemy) => enemy.id));
+    [...this.mirrorEnemyTargets.keys()].forEach((id) => { if (!activeEnemyIds.has(id)) this.mirrorEnemyTargets.delete(id); });
+    this.projectiles = snapshot.projectiles.map((projectile) => ({ ...projectile, position: { ...projectile.position } }));
+    if (this.projectiles.length > previousProjectileCount) {
+      const newest = this.projectiles[this.projectiles.length - 1];
+      if (newest) this.audio.shoot(360, newest.kind);
+    }
+    this.particles = snapshot.particles.map((particle) => ({
+      ...particle,
+      position: { ...particle.position },
+      velocity: { ...particle.velocity },
+      points: particle.points?.map((point: Point) => ({ ...point })),
+    }));
+    this.timedBombs = snapshot.timedBombs.map((bomb) => ({ ...bomb, position: { ...bomb.position } }));
+    this.spawnQueue = snapshot.spawnQueue
+      .filter((spawn): spawn is { kind: EnemyKind; spawnAt: number; hp: number } => typeof spawn.kind === "string" && Number.isFinite(spawn.spawnAt) && Number.isFinite(spawn.hp))
+      .map((spawn) => ({ ...spawn }));
+    if (!previousWaveActive && this.waveActive) this.audio.waveStart();
+    else if (previousWaveActive && !this.waveActive && !this.modeComplete) this.audio.waveClear();
+    if (!previousGameOver && this.gameOver) this.audio.defeat();
+    if (!previousModeComplete && this.modeComplete) this.audio.victory();
+    if (this.selectedTowerId !== null && !this.towers.some((tower) => tower.id === this.selectedTowerId)) this.selectedTowerId = null;
+    this.updatePlacement();
+    this.emitUi();
+    return true;
+  }
+
+  private updateMirror(delta: number): void {
+    const blend = 1 - Math.exp(-Math.min(delta, 0.1) * 18);
+    this.enemies.forEach((enemy) => {
+      const target = this.mirrorEnemyTargets.get(enemy.id);
+      if (target !== undefined) enemy.pathDistance += (target - enemy.pathDistance) * blend;
+    });
+    this.shake = Math.max(0, this.shake - delta * 3);
+  }
+
   private frame(timestamp: number): void {
     const rawDelta = this.lastTimestamp === 0 ? 0 : (timestamp - this.lastTimestamp) / 1000;
     this.lastTimestamp = timestamp;
@@ -1181,7 +1533,8 @@ export class Game {
     }
     const delta = Math.min(rawDelta, 0.05) * this.speed;
     this.elapsed += rawDelta;
-    if (!this.paused && !this.gameOver) this.update(delta);
+    if (this.isMirror) this.updateMirror(Math.min(rawDelta, 0.05));
+    else if (!this.paused && !this.gameOver) this.update(delta);
     else this.updateParticles(Math.min(rawDelta, 0.05));
     this.draw();
     this.uiTimer -= rawDelta;
@@ -1220,6 +1573,7 @@ export class Game {
 
   private spawnEnemy(kind: EnemyKind, hp: number, pathDistance = 0): void {
     const base = getEnemyDefinition(kind);
+    this.audio.enemySpawn(kind, Boolean(base.boss));
     this.enemies.push({
       id: this.nextId++,
       kind,
@@ -1241,6 +1595,7 @@ export class Game {
       burnTimer: 0,
       burnTickTimer: 0,
       burnDamage: 0,
+      burnOwnerId: null,
       burnSlowFactor: 1,
       hitFlash: 0,
       spawnScale: 0,
@@ -1259,7 +1614,7 @@ export class Game {
         enemy.burnTimer = Math.max(0, enemy.burnTimer - delta);
         enemy.burnTickTimer -= delta;
         if (enemy.burnTickTimer <= 0) {
-          this.damageEnemy(enemy, enemy.burnDamage, TOWER_DEFINITIONS.infernus.accent);
+          this.damageEnemy(enemy, enemy.burnDamage, TOWER_DEFINITIONS.infernus.accent, enemy.burnOwnerId ?? this.localPlayerId);
           enemy.burnTickTimer = enemy.burnDamage >= 4 ? 0.5 : 1;
           const position = this.enemyPosition(enemy);
           this.spawnSpark(position, TOWER_DEFINITIONS.infernus.accent, 24);
@@ -1308,6 +1663,7 @@ export class Game {
           });
           this.spawnRing(position, definition.sprite.accent, 0.75, 10, definition.shockwave.radius);
           this.spawnText(position, victims.length > 0 ? `SHOCKWAVE // ${victims.length} STUNNED` : "SHOCKWAVE", definition.sprite.accent);
+          this.audio.enemyShockwave();
           this.shake = Math.min(1, this.shake + 0.45);
           enemy.abilityTimer = definition.shockwave.interval;
         }
@@ -1370,7 +1726,7 @@ export class Game {
     for (let index = 0; index < 6; index += 1) this.spawnSpark(target, "#ff665c", 70 + Math.random() * 80);
     if (tower.hp <= 0) {
       this.callbacks.onLog(`${TOWER_DEFINITIONS[tower.kind].onPath.title} shattered under hostile pressure.`, "danger");
-      this.audio.breach();
+      this.audio.breach("tower");
     }
   }
 
@@ -1379,12 +1735,14 @@ export class Game {
     const damage = getEnemyDefinition(enemy.kind).coreDamage;
     this.integrity = Math.max(0, this.integrity - damage);
     this.shake = 1;
-    this.audio.breach();
+    this.audio.breach("core");
     this.callbacks.onLog(`CORE BREACH // -${damage} integrity.`, "danger");
     this.spawnText(this.map.core, `-${damage} CORE`, "#ff625d");
     if (this.integrity <= 0 && !this.gameOver) {
       this.gameOver = true;
       this.waveActive = false;
+      this.audio.stopAmbience();
+      this.audio.defeat();
       this.callbacks.onGameOver(this.waveNumber);
     }
   }
@@ -1397,8 +1755,9 @@ export class Game {
       const totalRefund = Math.floor(tower.totalInvested * ECONOMY_RULES.casualtyRefundRate);
       const immediateRefund = Math.ceil(totalRefund / 2);
       const deferredRefund = totalRefund - immediateRefund;
-      this.shards += immediateRefund;
-      this.pendingCasualtyRefund += deferredRefund;
+      const runtime = this.runtimeFor(tower.ownerId);
+      runtime.shards += immediateRefund;
+      runtime.pendingCasualtyRefund += deferredRefund;
       this.spawnText(tower.position, `+$${immediateRefund} // +$${deferredRefund} PENDING`, "#f1d07a");
       this.callbacks.onLog(
         `${TOWER_DEFINITIONS[tower.kind].name} casualty recovery // +$${immediateRefund} now, +$${deferredRefund} next wave.`,
@@ -1407,7 +1766,7 @@ export class Game {
     });
     const destroyedIds = new Set(destroyed.map((tower) => tower.id));
     this.towers = this.towers.filter((tower) => !destroyedIds.has(tower.id));
-    this.timedBombs = this.timedBombs.filter((bomb) => bomb.ownerId === undefined || !destroyedIds.has(bomb.ownerId));
+    this.timedBombs = this.timedBombs.filter((bomb) => bomb.sourceTowerId === undefined || !destroyedIds.has(bomb.sourceTowerId));
     if (this.selectedTowerId !== null && destroyedIds.has(this.selectedTowerId)) this.selectedTowerId = null;
     if (this.relocatingTowerId !== null && destroyedIds.has(this.relocatingTowerId)) {
       this.relocatingTowerId = null;
@@ -1439,7 +1798,7 @@ export class Game {
           this.canTowerTarget(tower, enemy) &&
           distance(tower.position, this.enemyPosition(enemy)) <= range,
       )
-      .forEach((enemy) => this.damageEnemy(enemy, damage, definition.accent));
+      .forEach((enemy) => this.damageEnemy(enemy, damage, definition.accent, tower.ownerId));
     for (let arc = 0; arc < 4; arc += 1) {
       const angle = (arc / 4) * TAU;
       const aim = {
@@ -1450,7 +1809,7 @@ export class Game {
     }
     this.spawnRing(tower.position, "#ffffff", 0.55, 7, range);
     this.spawnText(tower.position, "ARRIVAL SLASH", definition.accent);
-    this.audio.shoot(175);
+    this.audio.shoot(175, tower.kind);
   }
 
   private updateTowers(delta: number): void {
@@ -1510,6 +1869,7 @@ export class Game {
         tower.attackRamp = 0;
         tower.idleTimer = 0;
         this.spawnText(tower.position, "IDLE RELOAD", definition.dimAccent);
+        this.audio.towerReload(tower.kind);
       }
       // Pathbound placement adds blocking, HP, aggro, and a counter. It never
       // replaces the tower's normal targeting or ranged/area attack behavior.
@@ -1522,7 +1882,7 @@ export class Game {
 
       if (tower.kind === "bomber" && candidates.length === 0 && tower.meleeTimer <= 0) {
         const maxBombs = tower.level >= 5 ? 6 : tower.level >= 3 ? 4 : 3;
-        const existingBombs = this.timedBombs.filter((bomb) => bomb.proximity && bomb.ownerId === tower.id);
+        const existingBombs = this.timedBombs.filter((bomb) => bomb.proximity && bomb.sourceTowerId === tower.id);
         const pathSite = this.path.closest(tower.position);
         if (existingBombs.length < maxBombs && pathSite.offset <= range) {
           const spacing = (existingBombs.length - (maxBombs - 1) / 2) * 32;
@@ -1533,7 +1893,8 @@ export class Game {
               damage,
               radius: tower.level >= 1 ? 60 : 46,
               color: definition.accent,
-              ownerId: tower.id,
+              playerId: tower.ownerId,
+              sourceTowerId: tower.id,
               sourceKind: tower.kind,
               proximity: true,
               towerLevel: tower.level,
@@ -1551,7 +1912,7 @@ export class Game {
         if (slashTarget) {
           const impact = this.enemyPosition(slashTarget);
           this.enemiesInCone(tower.position, impact, innerTargets, 92, 0.62)
-            .forEach((enemy) => this.damageEnemy(enemy, damage * 2, definition.accent));
+            .forEach((enemy) => this.damageEnemy(enemy, damage * 2, definition.accent, tower.ownerId));
           this.spawnSlash(tower.position, impact, definition.accent, 92, 0.62);
           tower.meleeTimer = 3.5;
         }
@@ -1566,6 +1927,7 @@ export class Game {
             if (!target) continue;
             this.projectiles.push({
               position: { ...tower.position },
+              ownerId: tower.ownerId,
               delay: index * 1,
               targetId: target.id,
               damage: 140 * tower.damageBuff,
@@ -1593,12 +1955,12 @@ export class Game {
           const shots = tower.level >= 3 ? 2 : 1;
           for (let shot = 0; shot < shots; shot += 1) {
             this.projectiles.push({
-              position: { ...tower.position }, delay: shot * 0.14, targetId: target.id, damage, kind: tower.kind,
+              position: { ...tower.position }, ownerId: tower.ownerId, delay: shot * 0.14, targetId: target.id, damage, kind: tower.kind,
               speed: 560, splash: 0, chain: 0, towerLevel: tower.level,
             });
           }
           tower.fireTimer = stats.fireRate;
-          this.audio.shoot(360);
+          this.audio.shoot(360, tower.kind);
           break;
         }
         case "samurai": {
@@ -1614,11 +1976,11 @@ export class Game {
             const soulDamage = splitDamage * (tower.abilityTimer > 0 ? 0.33 : 1);
             const rawDamage = baseDamage + soulDamage;
             const hpBonus = Math.min(enemy.hp * hpPercent, rawDamage * (scalingCap - 1));
-            this.damageEnemy(enemy, (rawDamage + hpBonus) * stanceMultiplier * tower.damageBuff, definition.accent);
+            this.damageEnemy(enemy, (rawDamage + hpBonus) * stanceMultiplier * tower.damageBuff, definition.accent, tower.ownerId);
           });
           this.spawnSlash(tower.position, impact, definition.accent, meleeRange, 0.58);
           tower.fireTimer = stats.fireRate / (1 + tower.focus);
-          this.audio.shoot(240);
+          this.audio.shoot(240, tower.kind);
           break;
         }
         case "tempest": {
@@ -1628,7 +1990,7 @@ export class Game {
           tower.shotCounter += 1;
           if (tower.level >= 3 && tower.shotCounter % 6 === 0) this.startLightningField(tower);
           tower.fireTimer = 2;
-          this.audio.shoot(620);
+          this.audio.shoot(620, tower.kind);
           break;
         }
         case "cyborg": {
@@ -1639,7 +2001,7 @@ export class Game {
           const isHowitzer = magazineFinal || reactorHowitzer;
           const shotDamage = damage * (isHowitzer ? 10 : 1);
           const impact = this.enemyPosition(target);
-          this.damageEnemy(target, shotDamage, definition.accent);
+          this.damageEnemy(target, shotDamage, definition.accent, tower.ownerId);
           this.spawnCyborgBeam(tower.position, impact, definition.accent, isHowitzer ? 7 : 3.6);
           if (isHowitzer) {
             this.spawnExplosion(impact, definition.accent, 46);
@@ -1651,7 +2013,7 @@ export class Game {
                   this.canTowerTarget(tower, enemy) &&
                   distance(this.enemyPosition(enemy), impact) <= 46,
               )
-              .forEach((enemy) => this.damageEnemy(enemy, shotDamage, definition.accent));
+              .forEach((enemy) => this.damageEnemy(enemy, shotDamage, definition.accent, tower.ownerId));
           } else this.spawnSpark(impact, definition.accent, 20);
           if (isHowitzer) this.spawnText(tower.position, "HOWITZER", definition.accent);
           tower.idleTimer = 0;
@@ -1669,18 +2031,19 @@ export class Game {
               tower.fireTimer = stats.reload ?? 2;
               tower.attackRamp = 0;
               this.spawnText(tower.position, "RELOAD", definition.dimAccent);
+              this.audio.towerReload(tower.kind);
             }
           }
-          this.audio.shoot(isHowitzer ? 190 : 520);
+          this.audio.shoot(isHowitzer ? 190 : 520, tower.kind);
           break;
         }
         case "mercenary": {
           this.projectiles.push({
-            position: { ...tower.position }, delay: 0, targetId: target.id, damage, kind: tower.kind,
+            position: { ...tower.position }, ownerId: tower.ownerId, delay: 0, targetId: target.id, damage, kind: tower.kind,
             speed: 600, splash: 0, chain: 0, towerLevel: tower.level,
           });
           tower.fireTimer = stats.fireRate;
-          this.audio.shoot(430);
+          this.audio.shoot(430, tower.kind);
           break;
         }
         case "infernus": {
@@ -1688,7 +2051,7 @@ export class Game {
           const halfAngle = tower.level >= 3 ? 0.58 : tower.level >= 1 ? 0.48 : 0.38;
           const victims = this.enemiesInCone(tower.position, impact, candidates, range, halfAngle);
           victims.forEach((enemy) => {
-            if (damage > 0) this.damageEnemy(enemy, damage, definition.accent);
+            if (damage > 0) this.damageEnemy(enemy, damage, definition.accent, tower.ownerId);
             this.applyBurn(enemy, tower);
           });
           this.spawnSpray(
@@ -1701,19 +2064,19 @@ export class Game {
             range,
           );
           tower.fireTimer = stats.fireRate;
-          this.audio.shoot(170);
+          this.audio.shoot(170, tower.kind);
           break;
         }
         case "bomber": {
           tower.shotCounter += 1;
           const critical = tower.level >= 3 && tower.shotCounter % 4 === 0;
           this.projectiles.push({
-            position: { ...tower.position }, delay: 0, targetId: target.id, damage: damage * (critical ? 3 : 1), kind: tower.kind,
+            position: { ...tower.position }, ownerId: tower.ownerId, delay: 0, targetId: target.id, damage: damage * (critical ? 3 : 1), kind: tower.kind,
             speed: 330, splash: tower.level >= 1 ? 60 : 46, chain: 0, towerLevel: tower.level,
           });
           if (critical) this.spawnText(tower.position, "DYNAMITE x3", definition.accent);
           tower.fireTimer = stats.fireRate;
-          this.audio.shoot(205);
+          this.audio.shoot(205, tower.kind);
           break;
         }
         case "recon": {
@@ -1740,7 +2103,7 @@ export class Game {
               .filter(({ forward, sideways, hitWidth }) => forward >= 0 && forward <= range && sideways <= hitWidth)
               .sort((a, b) => a.forward - b.forward)
               .slice(0, tower.level >= 3 ? 3 : 2);
-            hits.forEach(({ enemy }) => this.damageEnemy(enemy, damage, definition.accent));
+            hits.forEach(({ enemy }) => this.damageEnemy(enemy, damage, definition.accent, tower.ownerId));
             this.spawnBeam(tower.position, end, pellet === 2 ? "#eafffb" : definition.accent, 2, pellet * 0.018);
           });
           this.spawnMuzzleFlash(tower.position, aim, definition.accent, 26);
@@ -1753,8 +2116,9 @@ export class Game {
             tower.ammo = stats.ammo ?? 5;
             tower.fireTimer = (stats.reload ?? 4) + stats.fireRate;
             this.spawnText(tower.position, "SHOTGUN RELOAD", definition.dimAccent);
+            this.audio.towerReload(tower.kind);
           }
-          this.audio.shoot(285);
+          this.audio.shoot(285, tower.kind);
           break;
         }
         case "gunner": {
@@ -1764,7 +2128,7 @@ export class Game {
           let resultingRamp = tower.attackRamp;
           for (let shot = 0; shot < burst; shot += 1) {
             this.projectiles.push({
-              position: { ...tower.position }, delay: shotDelay, targetId: target.id, damage,
+              position: { ...tower.position }, ownerId: tower.ownerId, delay: shotDelay, targetId: target.id, damage,
               kind: tower.kind, speed: 640, splash: 0, chain: 0, towerLevel: tower.level,
             });
             if (tower.level >= 4) resultingRamp = Math.min(4, resultingRamp + 0.02);
@@ -1776,12 +2140,12 @@ export class Game {
           }
           tower.fireTimer = shotDelay + stats.fireRate / (1 + tower.attackRamp);
           this.spawnMuzzleFlash(tower.position, this.enemyPosition(target), definition.accent, 22);
-          this.audio.shoot(455);
+          this.audio.shoot(455, tower.kind);
           break;
         }
         case "warrior": {
           const impact = this.enemyPosition(target);
-          this.damageEnemy(target, damage, definition.accent);
+          this.damageEnemy(target, damage, definition.accent, tower.ownerId);
           this.spawnSwordStrike(impact, definition.accent);
           if (tower.level >= 4) {
             this.delayedSlashes.push({
@@ -1793,7 +2157,7 @@ export class Game {
             });
           }
           tower.fireTimer = stats.fireRate;
-          this.audio.shoot(210);
+          this.audio.shoot(210, tower.kind);
           break;
         }
       }
@@ -1824,7 +2188,7 @@ export class Game {
     const accent = TOWER_DEFINITIONS.tempest.accent;
     const radius = tower.level >= 4 ? 60 : tower.level >= 2 ? 30 : 0;
     const damage = stats.damage * tower.damageBuff;
-    this.damageEnemy(target, damage, accent);
+    this.damageEnemy(target, damage, accent, tower.ownerId);
     const impact = this.enemyPosition(target);
     if (radius > 0) {
       this.enemies
@@ -1835,7 +2199,7 @@ export class Game {
             this.canTowerTarget(tower, enemy) &&
             distance(this.enemyPosition(enemy), impact) <= radius,
         )
-        .forEach((enemy) => this.damageEnemy(enemy, damage, accent));
+        .forEach((enemy) => this.damageEnemy(enemy, damage, accent, tower.ownerId));
     }
     if (tower.level >= 2) this.applyShockAround(tower, tower.level >= 4 ? 0.1 : 0.5, 2);
     this.spawnArc(tower.position, impact, accent);
@@ -1864,7 +2228,7 @@ export class Game {
       )
       .forEach((enemy) => {
         const totalDamage = clamp(enemy.hp * 0.08, minFieldDamage, maxFieldDamage);
-        this.damageEnemy(enemy, (totalDamage / duration) * tower.damageBuff, TOWER_DEFINITIONS.tempest.accent);
+        this.damageEnemy(enemy, (totalDamage / duration) * tower.damageBuff, TOWER_DEFINITIONS.tempest.accent, tower.ownerId);
         if (tower.level >= 2) this.applyShock(enemy, tower, 2);
       });
   }
@@ -1973,9 +2337,9 @@ export class Game {
       const target = this.enemies.find((enemy) => enemy.id === slash.targetId && enemy.hp > 0);
       if (!tower || !target || !this.canTowerTarget(tower, target)) continue;
       const impact = this.enemyPosition(target);
-      this.damageEnemy(target, slash.damage, slash.color);
+      this.damageEnemy(target, slash.damage, slash.color, tower.ownerId);
       this.spawnSwordStrike(impact, slash.color);
-      this.audio.shoot(260);
+      this.audio.shoot(260, tower.kind);
     }
     this.delayedSlashes = survivors;
   }
@@ -1987,7 +2351,7 @@ export class Game {
       if (projectile.kind !== "bomber" || projectile.towerLevel < 1 || enemy.burnTimer <= 0) return projectile.damage;
       return projectile.damage * (projectile.towerLevel >= 5 && enemy.burnDamage >= 7 ? 3 : 2);
     };
-    this.damageEnemy(target, damageAgainst(target), accent);
+    this.damageEnemy(target, damageAgainst(target), accent, projectile.ownerId);
     const impact = this.enemyPosition(target);
     if (projectile.splash > 0) {
       this.spawnExplosion(impact, accent, projectile.splash);
@@ -1998,7 +2362,7 @@ export class Game {
             this.canTowerKindTarget(projectile.kind, projectile.towerLevel, enemy) &&
             distance(this.enemyPosition(enemy), impact) <= projectile.splash,
         );
-      splashed.forEach((enemy) => this.damageEnemy(enemy, damageAgainst(enemy), accent));
+      splashed.forEach((enemy) => this.damageEnemy(enemy, damageAgainst(enemy), accent, projectile.ownerId));
     } else this.spawnImpactDust(impact, accent);
   }
 
@@ -2008,7 +2372,9 @@ export class Game {
     const damage = level >= 5 ? 10 : level >= 4 ? 4 : level >= 3 ? 3 : 1;
     const slowFactor = level >= 5 ? 0.75 : level >= 2 ? 0.85 : 1;
     enemy.burnTimer = Math.max(enemy.burnTimer, duration);
-    enemy.burnDamage = Math.max(enemy.burnDamage, damage * strength * tower.damageBuff);
+    const appliedDamage = damage * strength * tower.damageBuff;
+    if (appliedDamage >= enemy.burnDamage) enemy.burnOwnerId = tower.ownerId;
+    enemy.burnDamage = Math.max(enemy.burnDamage, appliedDamage);
     enemy.burnSlowFactor = Math.min(enemy.burnSlowFactor, slowFactor);
     if (enemy.burnTickTimer <= 0) enemy.burnTickTimer = level >= 4 ? 0.5 : 1;
   }
@@ -2042,17 +2408,17 @@ export class Game {
           const burningMultiplier = canExploitBurn && enemy.burnTimer > 0
             ? ((bomb.towerLevel ?? 5) >= 5 && enemy.burnDamage >= 7 ? 3 : 2)
             : 1;
-          this.damageEnemy(enemy, bomb.damage * burningMultiplier, bomb.color);
+          this.damageEnemy(enemy, bomb.damage * burningMultiplier, bomb.color, bomb.playerId);
         });
       this.spawnExplosion(bomb.position, bomb.color, bomb.radius);
       this.spawnText(bomb.position, bomb.proximity ? "PATH BOMB" : "TIME BOMB // 500", bomb.color);
       this.shake = Math.min(1, this.shake + 0.8);
-      this.audio.breach();
+      this.audio.breach("explosion");
     }
     this.timedBombs = survivors;
   }
 
-  private damageEnemy(enemy: Enemy, amount: number, _color: string): void {
+  private damageEnemy(enemy: Enemy, amount: number, _color: string, ownerId: PlayerId = this.localPlayerId): void {
     if (enemy.hp <= 0) return;
     const incoming = Math.max(0, amount);
     if (incoming <= 0) return;
@@ -2062,22 +2428,30 @@ export class Game {
     if (enemy.shieldHp > 0) {
       enemy.shieldHp = Math.max(0, enemy.shieldHp - incoming);
       enemy.hitFlash = 1;
+      this.audio.enemyHit(true);
       return;
     }
 
     const dealt = Math.min(enemy.hp, incoming);
     enemy.hp -= dealt;
-    this.damageIncomeRemainder += dealt * ECONOMY_RULES.damageCashPerHp;
-    const payout = Math.floor(this.damageIncomeRemainder);
+    const runtime = this.runtimeFor(ownerId);
+    const multiplayerMultiplier = this.multiplayerActive ? this.mode.multiplayerHitCashMultiplier : 1;
+    runtime.damageIncomeRemainder += dealt * ECONOMY_RULES.damageCashPerHp * multiplayerMultiplier;
+    const payout = Math.floor(runtime.damageIncomeRemainder);
     if (payout > 0) {
-      this.shards += payout;
-      this.damageIncomeRemainder -= payout;
+      runtime.shards += payout;
+      runtime.damageIncomeRemainder -= payout;
     }
     enemy.hitFlash = 1;
+    this.audio.enemyHit(false);
   }
 
   private removeDeadEnemies(): void {
-    const deadIds = new Set(this.enemies.filter((enemy) => enemy.hp <= 0).map((enemy) => enemy.id));
+    const dead = this.enemies.filter((enemy) => enemy.hp <= 0);
+    dead.forEach((enemy) => {
+      if (enemy.hp > -9990) this.audio.enemyDeath(Boolean(getEnemyDefinition(enemy.kind).boss));
+    });
+    const deadIds = new Set(dead.map((enemy) => enemy.id));
     this.enemies = this.enemies.filter((enemy) => enemy.hp > 0);
     if (deadIds.size > 0) this.towers.forEach((tower) => deadIds.forEach((id) => tower.engaged.delete(id)));
   }
@@ -2087,16 +2461,19 @@ export class Game {
     this.nextWaveIndex += 1;
     const wave = this.mode.waves[this.waveNumber - 1];
     const bonus = wave?.cashReward ?? (ECONOMY_RULES.waveClearBase + ECONOMY_RULES.waveClearPerWave * this.waveNumber);
-    this.shards += bonus;
+    this.playerRuntimes.forEach((runtime) => { runtime.shards += bonus; });
     this.towers.forEach((tower) => {
       if (!tower.onPath || tower.hp >= tower.maxHp) return;
       const missingHp = tower.maxHp - tower.hp;
       tower.hp = Math.min(tower.maxHp, tower.hp + missingHp * 0.7 + 4);
     });
     this.callbacks.onLog(`Wave ${this.waveNumber.toString().padStart(2, "0")} purged // +$${bonus}; blockers repaired for 70% missing HP + 4.`, "good");
-    this.audio.tone(280, 0.18, 0.024, 220);
+    this.audio.waveClear();
+    this.audio.setAmbienceIntensity(0.12);
     if (this.nextWaveIndex >= this.mode.waves.length) {
       this.modeComplete = true;
+      this.audio.stopAmbience();
+      this.audio.victory();
       this.callbacks.onLog(`${this.mode.name.toUpperCase()} COMPLETE // all ${this.mode.waves.length} waves cleared.`, "good");
       this.callbacks.onVictory(this.mode);
     } else {
@@ -2150,6 +2527,13 @@ export class Game {
       started: this.started,
       gameOver: this.gameOver,
       modeComplete: this.modeComplete,
+      multiplayer: this.multiplayerActive,
+      mirror: this.isMirror,
+      localPlayerId: this.localPlayerId,
+      selectedOwned: tower?.ownerId === this.localPlayerId,
+      teammates: [...this.playerProfiles.values()]
+        .filter((player) => player.id !== this.localPlayerId)
+        .map((player) => ({ ...player, shards: this.runtimeFor(player.id).shards })),
     });
   }
 
@@ -2523,6 +2907,7 @@ export class Game {
     this.enemies.forEach((enemy) => this.drawEnemy(enemy));
     this.drawBossHealthbars();
     this.drawPlacement();
+    this.drawRemoteCursor();
     this.drawParticles();
     context.restore();
     this.drawVignette();
@@ -2579,6 +2964,14 @@ export class Game {
     context.save();
     context.translate(tower.position.x, tower.position.y);
     context.scale(pulse, pulse);
+    const owner = this.playerProfiles.get(tower.ownerId);
+    if (this.multiplayerActive && owner) {
+      context.beginPath();
+      context.arc(0, 0, 38, 0, TAU);
+      context.strokeStyle = `${owner.color}cc`;
+      context.lineWidth = tower.ownerId === this.localPlayerId ? 2 : 3;
+      context.stroke();
+    }
     if (tower.stunTimer > 0) {
       context.beginPath();
       context.arc(0, 0, 37, 0, TAU);
@@ -2691,6 +3084,15 @@ export class Game {
     }
     context.restore();
 
+    if (this.multiplayerActive && owner && tower.ownerId !== this.localPlayerId) {
+      context.save();
+      context.font = "700 9px ui-monospace, monospace";
+      context.textAlign = "center";
+      context.fillStyle = owner.color;
+      context.fillText(owner.username.toUpperCase(), tower.position.x, tower.position.y - 47);
+      context.restore();
+    }
+
     context.save();
     context.font = "700 9px ui-monospace, monospace";
     context.textAlign = "center";
@@ -2734,6 +3136,35 @@ export class Game {
       this.drawBar(tower.position.x - 26, tower.position.y + 32, 52, 5, tower.hp / tower.maxHp, definition.accent);
       this.drawAggro(tower);
     }
+  }
+
+  private drawRemoteCursor(): void {
+    const cursor = this.remoteCursor;
+    if (!cursor?.point || performance.now() - cursor.updatedAt > 8_000) return;
+    const context = this.context;
+    const { point, player } = cursor;
+    context.save();
+    context.translate(point.x, point.y);
+    context.fillStyle = player.color;
+    context.strokeStyle = "rgba(7,10,11,.92)";
+    context.lineWidth = 3;
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.lineTo(2, 23);
+    context.lineTo(8, 16);
+    context.lineTo(15, 25);
+    context.lineTo(20, 21);
+    context.lineTo(13, 13);
+    context.lineTo(23, 11);
+    context.closePath();
+    context.stroke();
+    context.fill();
+    context.font = "700 11px ui-monospace, monospace";
+    context.textAlign = "center";
+    context.textBaseline = "bottom";
+    context.strokeText(player.username.toUpperCase(), 8, -8);
+    context.fillText(player.username.toUpperCase(), 8, -8);
+    context.restore();
   }
 
   private drawAggro(tower: Tower): void {

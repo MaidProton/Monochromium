@@ -1,7 +1,7 @@
 {
   "name": "monochromium",
   "private": true,
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "A pathbound counter-defense game.",
   "author": "Monochromium",
   "type": "module",
@@ -16,7 +16,8 @@
     "desktop:release:patch": "npm version patch --no-git-tag-version && npm run desktop:make"
   },
   "dependencies": {
-    "electron-squirrel-startup": "^1.0.1"
+    "electron-squirrel-startup": "^1.0.1",
+    "tone": "^15.1.22"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
