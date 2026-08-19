@@ -1,4 +1,5 @@
 import { getEnemyDefinition, isKnownEnemyKind } from "./enemyRegistry.ts";
+import { DEFAULT_MULTIPLAYER_HIT_CASH_MULTIPLIER } from "./config.ts";
 import { saveDiskSection } from "./persistence.ts";
 import type { EnemyGroupWaveBlock, EnemyKind, ModeDefinition, ModeKind } from "./types.ts";
 
@@ -24,6 +25,7 @@ export interface CustomModeDraft {
   description: string;
   startingCash: number;
   coreIntegrity: number;
+  multiplayerHitCashMultiplier: number;
   waves: CustomWaveDraft[];
   updatedAt: number;
 }
@@ -65,6 +67,7 @@ export const createCustomMode = (): CustomModeDraft => ({
   description: "A custom finite defense timeline.",
   startingCash: 500,
   coreIntegrity: 12,
+  multiplayerHitCashMultiplier: DEFAULT_MULTIPLAYER_HIT_CASH_MULTIPLIER,
   waves: [{ cashReward: 50, blocks: [freshBlock()] }],
   updatedAt: Date.now(),
 });
@@ -110,6 +113,12 @@ const sanitizeMode = (value: unknown): CustomModeDraft | null => {
     description: safeText(source.description, "A custom finite defense timeline.", 220),
     startingCash: integerInRange(source.startingCash, 500, 0, 1_000_000_000),
     coreIntegrity: integerInRange(source.coreIntegrity, 12, 1, 9999),
+    multiplayerHitCashMultiplier: numberInRange(
+      source.multiplayerHitCashMultiplier,
+      DEFAULT_MULTIPLAYER_HIT_CASH_MULTIPLIER,
+      0,
+      1,
+    ),
     waves: waves.length > 0 ? waves : [{ cashReward: 50, blocks: [freshBlock()] }],
     updatedAt: integerInRange(source.updatedAt, Date.now(), 0, Number.MAX_SAFE_INTEGER),
   };
@@ -177,6 +186,7 @@ export const customModeToDefinition = (draft: CustomModeDraft): ModeDefinition =
     description: draft.description,
     startingCash: draft.startingCash,
     coreIntegrity: draft.coreIntegrity,
+    multiplayerHitCashMultiplier: draft.multiplayerHitCashMultiplier,
     reward: { coins: 0, tokens: 0 },
     waves,
   };

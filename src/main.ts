@@ -13,6 +13,7 @@ import {
   WORLD_HEIGHT,
 } from "./game/config.ts";
 import { Game, type GameUiState } from "./game/Game.ts";
+import { AudioSystem, type AudioBus, type AudioSettings } from "./game/audio.ts";
 import {
   cacheCustomEnemiesLocally,
   cloneCustomEnemy,
@@ -68,7 +69,18 @@ import {
   scaleMapPoint,
 } from "./game/mapRendering.ts";
 import { clamp, distance, Polyline } from "./game/math.ts";
-import { cacheProgressLocally, loadProgress, sanitizeProgress, saveProgress, toggleTowerLoadout, unlockEveryTower, unlockTower } from "./game/meta.ts";
+import {
+  MULTIPLAYER_SNAPSHOT_HZ,
+  MultiplayerSession,
+  sanitizeMultiplayerPlayer,
+  type MultiplayerConnectionStatus,
+  type MultiplayerControlMessage,
+  type MultiplayerPlayer,
+  type MultiplayerRealtimeMessage,
+  type MultiplayerResult,
+  type MultiplayerSessionStart,
+} from "./game/multiplayer.ts";
+import { cacheProgressLocally, loadProgress, resetProgress, sanitizeProgress, saveProgress, toggleTowerLoadout, unlockEveryTower, unlockTower } from "./game/meta.ts";
 import { getDesktopEnvironment, hasDiskSaveApi, loadDiskSave, replaceDiskSave, type SaveBundle } from "./game/persistence.ts";
 import {
   assignCreatorAssets,
@@ -99,6 +111,7 @@ app.innerHTML = `
       <div class="stage-topline">
         <span id="mode-label">MODE 01 // NORMAL</span>
         <span id="threat-label">THREAT: DORMANT</span>
+        <span id="multiplayer-hud" hidden>ALLY // OFFLINE</span>
       </div>
       <div class="top-stats" aria-label="Game status">
         <div class="stat core-stat">
@@ -117,13 +130,16 @@ app.innerHTML = `
         </div>
       </div>
       <div class="utility-controls">
+        <button class="icon-button" data-action="multiplayer-link" aria-label="Open multiplayer link controls" title="Multiplayer connection" hidden>
+          <span>LNK</span>
+        </button>
         <button class="icon-button" data-action="debug" aria-label="Open debug tools" title="Debug tools (F1)">
           <span>DBG</span>
         </button>
         <button class="icon-button" data-action="main-menu" aria-label="Return to main menu" title="Main menu">
           <span>MENU</span>
         </button>
-        <button class="icon-button" data-action="sound" aria-label="Toggle sound" title="Toggle sound">
+        <button class="icon-button" data-action="sound-settings" aria-label="Open sound settings" aria-controls="audio-settings" aria-expanded="false" title="Sound settings">
           <span id="sound-icon">SND</span>
         </button>
         <button class="icon-button" data-action="speed" aria-label="Change game speed" title="Change speed">
@@ -134,6 +150,22 @@ app.innerHTML = `
         </button>
       </div>
     </header>
+
+    <aside class="audio-settings" id="audio-settings" aria-label="Sound settings" role="dialog" hidden>
+      <div class="audio-settings-head">
+        <div><span>SOUND CONTROL</span><small>PROCEDURAL AUDIO MIXER</small></div>
+        <button data-action="audio-settings-close" aria-label="Close sound settings">×</button>
+      </div>
+      <label class="audio-enabled-row"><input id="audio-enabled" data-audio-enabled type="checkbox"><span><strong>SOUND ENABLED</strong><small>Mute all audio without changing the mix.</small></span><b id="audio-enabled-value">ON</b></label>
+      <div class="audio-slider-list">
+        <label><span><b>MASTER</b><output id="audio-value-master">100%</output></span><input type="range" min="0" max="1" step="0.01" value="1" data-audio-volume="master" aria-label="Master volume"></label>
+        <label><span><b>TOWERS</b><output id="audio-value-towers">100%</output></span><input type="range" min="0" max="1" step="0.01" value="1" data-audio-volume="towers" aria-label="Tower volume"></label>
+        <label><span><b>ENEMIES</b><output id="audio-value-enemies">100%</output></span><input type="range" min="0" max="1" step="0.01" value="1" data-audio-volume="enemies" aria-label="Enemy volume"></label>
+        <label><span><b>UI</b><output id="audio-value-ui">100%</output></span><input type="range" min="0" max="1" step="0.01" value="1" data-audio-volume="ui" aria-label="UI volume"></label>
+        <label><span><b>AMBIENCE</b><output id="audio-value-ambience">35%</output></span><input type="range" min="0" max="1" step="0.01" value="0.35" data-audio-volume="ambience" aria-label="Ambience volume"></label>
+      </div>
+      <div class="audio-settings-foot"><small id="audio-settings-status">Settings save automatically.</small><button class="secondary-button" data-action="audio-reset">RESET MIX</button></div>
+    </aside>
 
     <div class="playfield-layout">
     <main class="game-stage" aria-label="Battlefield">
@@ -162,6 +194,7 @@ app.innerHTML = `
           <button data-action="debug-stock"><span>RESTORE STOCK</span><b>ALL TOWERS</b></button>
           <button data-action="debug-max"><span>MAX SELECTED</span><b>FREE</b></button>
           <button data-action="debug-unlock"><span>UNLOCK TOWERS</span><b>PERMANENT</b></button>
+          <button class="danger" data-action="debug-reset-progress"><span>RESET PROGRESSION</span><b>COINS // TOWERS // CLEARS</b></button>
           <button data-action="debug-balance" id="debug-balance-button" hidden><span>TOWER BALANCE LAB</span><b>LIVE + SAVE TO CONFIG</b></button>
         </div>
       </aside>
@@ -185,6 +218,7 @@ app.innerHTML = `
         </div>
         <div class="menu-actions">
           <button class="primary-button wide" data-action="open-modes">PLAY MODES <span>→</span></button>
+          <button class="secondary-button wide" data-action="open-multiplayer">MULTIPLAYER // P2P</button>
           <button class="secondary-button wide" data-action="open-creators">CREATORS</button>
           <button class="secondary-button wide" data-action="open-shop">TOWER SHOP</button>
         </div>
@@ -198,6 +232,41 @@ app.innerHTML = `
         <div><span>SYSTEM UPDATE</span><strong id="update-status">Updater unavailable</strong></div>
         <div class="update-actions"><button class="secondary-button" data-action="check-update" id="check-update-button">CHECK</button><button class="secondary-button" data-action="download-update" id="download-update-button" hidden>DOWNLOAD UPDATE</button><button class="primary-button" data-action="install-update" id="install-update-button" hidden>RESTART &amp; INSTALL</button></div>
       </section>
+      </div>
+
+      <div class="menu-screen multiplayer-screen" id="multiplayer-screen" hidden>
+        <div class="multiplayer-heading">
+          <div><div class="onboarding-kicker">DIRECT LINK // WEBRTC</div><h2>MULTIPLAYER</h2></div>
+          <div class="multiplayer-status" id="multiplayer-status" data-status="idle"><span>CONNECTION</span><strong>IDLE</strong><small>No peer connection active.</small></div>
+        </div>
+        <p class="multiplayer-intro">The host runs the authoritative battle. Pair by sending copy/paste codes outside the game; public STUN assists discovery, but no gameplay server or account is used.</p>
+        <div class="multiplayer-profile">
+          <label><span>USERNAME</span><input id="multiplayer-username" maxlength="20" autocomplete="nickname" value="PLAYER"></label>
+          <label><span>DISPLAY COLOR</span><input id="multiplayer-color" type="color" value="#66d9ff"></label>
+        </div>
+        <div class="multiplayer-columns">
+          <section>
+            <span class="multiplayer-step">HOST // 01</span><h3>CREATE SESSION</h3>
+            <p>Create an offer and send it to your guest.</p>
+            <button class="primary-button" data-action="multiplayer-create-offer">CREATE / RECONNECT OFFER</button>
+            <label><span>HOST OFFER</span><textarea id="multiplayer-host-offer" readonly spellcheck="false" placeholder="Your offer appears here"></textarea></label>
+            <button class="secondary-button" data-action="multiplayer-copy" data-copy-target="multiplayer-host-offer">COPY OFFER</button>
+            <label><span>GUEST ANSWER</span><textarea id="multiplayer-host-answer" spellcheck="false" placeholder="Paste the guest answer here"></textarea></label>
+            <button class="secondary-button" data-action="multiplayer-apply-answer">APPLY ANSWER</button>
+            <button class="primary-button" id="multiplayer-choose-mode" data-action="multiplayer-choose-mode" disabled>CHOOSE MODE &amp; MAP <span>→</span></button>
+          </section>
+          <section>
+            <span class="multiplayer-step">GUEST // 01</span><h3>JOIN SESSION</h3>
+            <p>Paste the host offer to generate an answer.</p>
+            <label><span>HOST OFFER</span><textarea id="multiplayer-guest-offer" spellcheck="false" placeholder="Paste the host offer here"></textarea></label>
+            <button class="primary-button" data-action="multiplayer-create-answer">CREATE ANSWER</button>
+            <label><span>GUEST ANSWER</span><textarea id="multiplayer-guest-answer" readonly spellcheck="false" placeholder="Your answer appears here"></textarea></label>
+            <button class="secondary-button" data-action="multiplayer-copy" data-copy-target="multiplayer-guest-answer">COPY ANSWER</button>
+            <small>After the host applies your answer, wait here. Their selected content and battle state will load automatically.</small>
+          </section>
+        </div>
+        <div class="multiplayer-foot"><span id="multiplayer-peer">PEER // NOT LINKED</span><span>HIT CASH // MODE DEFINED (DEFAULT 75%) // WAVE CASH 100% EACH</span></div>
+        <div class="multiplayer-screen-actions"><button class="secondary-button" data-action="multiplayer-back">BACK TO COMMAND</button><button class="primary-button" id="multiplayer-return-run" data-action="multiplayer-return-run" hidden>RETURN TO BATTLE</button></div>
       </div>
 
       <div class="menu-screen creator-hub" id="creator-hub" hidden>
@@ -354,11 +423,11 @@ app.innerHTML = `
         </div>
         <div class="map-library-grid">
           <section>
-            <div class="library-label"><span>OFFICIAL MAPS</span><small>READ ONLY</small></div>
+            <div class="library-label"><span>OFFICIAL MAPS</span><small>PROFILE REWARDS ENABLED</small></div>
             <div class="map-list" id="official-map-list"></div>
           </section>
           <section>
-            <div class="library-label"><span>CREATED MAPS</span><small>LOCAL // SANDBOX</small></div>
+            <div class="library-label"><span>CREATED MAPS</span><small>LOCAL // NO PROFILE REWARDS</small></div>
             <div class="map-list" id="custom-map-list"></div>
           </section>
         </div>
@@ -440,6 +509,7 @@ app.innerHTML = `
             <label class="wide"><span>DESCRIPTION</span><textarea data-mode-field="description" maxlength="220" rows="2"></textarea></label>
             <label><span>STARTING CASH</span><input data-mode-field="startingCash" type="number" min="0" step="1"></label>
             <label><span>CORE INTEGRITY</span><input data-mode-field="coreIntegrity" type="number" min="1" step="1"></label>
+            <label class="multiplayer-cash-field"><span>MULTIPLAYER HIT CASH <output id="multiplayer-hitcash-value">75% // $0.75 PER 1 DAMAGE</output></span><input data-mode-field="multiplayerHitCashMultiplier" type="range" min="0" max="100" step="1" value="75"><small>Only affects cash earned from damage during multiplayer. Solo hit cash remains $1 per damage.</small></label>
           </section>
           <div class="creator-workspace">
             <aside class="wave-rail">
@@ -566,6 +636,13 @@ const query = <T extends Element>(selector: string): T => {
 const canvas = query<HTMLCanvasElement>("#game-canvas");
 const shell = query<HTMLDivElement>(".shell");
 const mainMenu = query<HTMLDivElement>("#main-menu");
+const multiplayerScreen = query<HTMLDivElement>("#multiplayer-screen");
+const multiplayerStatus = query<HTMLElement>("#multiplayer-status");
+const multiplayerPeer = query<HTMLElement>("#multiplayer-peer");
+const multiplayerUsername = query<HTMLInputElement>("#multiplayer-username");
+const multiplayerColor = query<HTMLInputElement>("#multiplayer-color");
+const multiplayerChooseMode = query<HTMLButtonElement>("#multiplayer-choose-mode");
+const multiplayerReturnRun = query<HTMLButtonElement>("#multiplayer-return-run");
 const creatorHub = query<HTMLDivElement>("#creator-hub");
 const enemySelection = query<HTMLDivElement>("#enemy-selection");
 const enemyCreator = query<HTMLDivElement>("#enemy-creator");
@@ -583,6 +660,9 @@ const battleLog = query<HTMLElement>("#battle-log");
 const towerInspector = query<HTMLElement>("#tower-inspector");
 const selectedPill = query<HTMLButtonElement>("#selected-pill");
 const debugPanel = query<HTMLElement>("#debug-panel");
+const soundButton = query<HTMLButtonElement>("[data-action='sound-settings']");
+const audioSettingsPanel = query<HTMLElement>("#audio-settings");
+const audioEnabledInput = query<HTMLInputElement>("#audio-enabled");
 const debugBalanceButton = query<HTMLButtonElement>("#debug-balance-button");
 const balanceLab = query<HTMLElement>("#balance-lab");
 const balanceTowerKind = query<HTMLSelectElement>("#balance-tower-kind");
@@ -622,7 +702,7 @@ let mapHistory: CustomMapDraft[] = [];
 let mapFuture: CustomMapDraft[] = [];
 let mapSelectionState: { type: "point"; index: number } | { type: "zone"; id: string } | null = null;
 let mapDragState: { type: "point" | "zone" | "resize"; start: Point; original: CustomMapDraft } | null = null;
-let libraryReturnScreen: "main" | "creators" = "main";
+let libraryReturnScreen: "main" | "multiplayer" | "creators" = "main";
 let mapTestActive = false;
 const selectedEnemyIds = new Set<string>();
 const selectedModeIds = new Set<string>();
@@ -631,6 +711,273 @@ let activeModeFolderId: string | null = null;
 let activeEnemyFolderId: string | null = null;
 let activeMapFolderId: string | null = null;
 let runSettled = false;
+const audio = new AudioSystem();
+const MULTIPLAYER_PROFILE_KEY = "monochromium.multiplayer-profile.v1";
+const MULTIPLAYER_REWARD_KEY = "monochromium.multiplayer-results.v1";
+
+const loadMultiplayerPlayer = (): MultiplayerPlayer => {
+  try {
+    const stored = window.localStorage.getItem(MULTIPLAYER_PROFILE_KEY);
+    const parsed = stored ? JSON.parse(stored) as Partial<MultiplayerPlayer> : {};
+    return sanitizeMultiplayerPlayer({ ...parsed, loadout: progress.loadout });
+  } catch {
+    return sanitizeMultiplayerPlayer({ username: "PLAYER", color: "#66d9ff", loadout: progress.loadout });
+  }
+};
+
+let localMultiplayerPlayer = loadMultiplayerPlayer();
+let remoteMultiplayerPlayer: MultiplayerPlayer | null = null;
+let activeMultiplayerStart: MultiplayerSessionStart | null = null;
+let multiplayerHostSelecting = false;
+let multiplayerSequence = 0;
+let multiplayerHelloSent = false;
+let guestSessionContentActive = false;
+let pendingMultiplayerResult: MultiplayerResult | null = null;
+
+multiplayerUsername.value = localMultiplayerPlayer.username;
+multiplayerColor.value = localMultiplayerPlayer.color;
+
+const persistMultiplayerPlayer = (): void => {
+  localMultiplayerPlayer = sanitizeMultiplayerPlayer({
+    ...localMultiplayerPlayer,
+    username: multiplayerUsername.value,
+    color: multiplayerColor.value,
+    loadout: progress.loadout,
+  }, localMultiplayerPlayer.id);
+  multiplayerUsername.value = localMultiplayerPlayer.username;
+  multiplayerColor.value = localMultiplayerPlayer.color;
+  try {
+    window.localStorage.setItem(MULTIPLAYER_PROFILE_KEY, JSON.stringify(localMultiplayerPlayer));
+  } catch {
+    // The current pairing still works if preferences cannot be persisted.
+  }
+};
+
+const multiplayerSession = new MultiplayerSession({
+  onStatus: (status, detail) => handleMultiplayerStatus(status, detail),
+  onControl: (message) => handleMultiplayerControl(message),
+  onRealtime: (message) => handleMultiplayerRealtime(message),
+});
+
+function renderMultiplayerStatus(status: MultiplayerConnectionStatus, detail = ""): void {
+  multiplayerStatus.dataset["status"] = status;
+  const label = multiplayerStatus.querySelector<HTMLElement>("strong");
+  const copy = multiplayerStatus.querySelector<HTMLElement>("small");
+  if (label) label.textContent = status.replaceAll("-", " ").toUpperCase();
+  if (copy) copy.textContent = detail || "No peer connection active.";
+  multiplayerPeer.textContent = remoteMultiplayerPlayer
+    ? `PEER // ${remoteMultiplayerPlayer.username.toUpperCase()} // ${remoteMultiplayerPlayer.id.slice(0, 8)}`
+    : "PEER // NOT LINKED";
+  multiplayerChooseMode.disabled = !(multiplayerSession.role === "host" && multiplayerSession.connected && remoteMultiplayerPlayer);
+}
+
+function handleMultiplayerStatus(status: MultiplayerConnectionStatus, detail?: string): void {
+  if (status !== "connected") multiplayerHelloSent = false;
+  renderMultiplayerStatus(status, detail);
+  if (status === "connected" && !multiplayerHelloSent) {
+    multiplayerHelloSent = true;
+    persistMultiplayerPlayer();
+    multiplayerSession.sendControl({ type: "hello", player: localMultiplayerPlayer });
+  }
+  if (status === "disconnected" && multiplayerSession.role === "host" && activeMultiplayerStart) {
+    addLog("Guest link lost // their towers and wallet remain active. Re-pair to restore control.", "danger");
+  }
+}
+
+function validSessionStart(session: MultiplayerSessionStart): boolean {
+  const finitePoint = (point: Point | undefined): boolean => Boolean(point && Number.isFinite(point.x) && Number.isFinite(point.y));
+  const wavesValid = Array.isArray(session?.mode?.waves) && session.mode.waves.every((wave) => {
+    const groupsValid = wave.groups === undefined || (Array.isArray(wave.groups) && wave.groups.length <= 100 && wave.groups.every(
+      (group: { kind: unknown; count: number; gap: number }) => typeof group.kind === "string" && Number.isFinite(group.count) && group.count >= 0 && group.count <= 10_000 && Number.isFinite(group.gap) && group.gap >= 0,
+    ));
+    const blocksValid = wave.blocks === undefined || (Array.isArray(wave.blocks) && wave.blocks.length <= 100 && wave.blocks.every(
+      (block: { command: unknown; enemy: unknown; count: number; spawnDelay: number; nextBlockDelay: number }) => block.command === "enemyGroup" && typeof block.enemy === "string" && Number.isFinite(block.count) && block.count >= 0 && block.count <= 10_000 && Number.isFinite(block.spawnDelay) && block.spawnDelay >= 0 && Number.isFinite(block.nextBlockDelay) && block.nextBlockDelay >= 0,
+    ));
+    return groupsValid && blocksValid && Number.isFinite(wave.referenceHealth) && (wave.waveTimeSeconds === null || Number.isFinite(wave.waveTimeSeconds));
+  });
+  return Boolean(
+    session &&
+    session.id === multiplayerSession.sessionId &&
+    session.map && Array.isArray(session.map.path) && session.map.path.length >= 2 && session.map.path.length <= 64 && session.map.path.every(finitePoint) &&
+    finitePoint(session.map.core) && finitePoint(session.map.entryLabel) && finitePoint(session.map.pathLabel) && Array.isArray(session.map.blockedZones) && session.map.blockedZones.length <= 64 && session.map.blockedZones.every((zone) => Number.isFinite(zone.x) && Number.isFinite(zone.y) && Number.isFinite(zone.width) && Number.isFinite(zone.height)) &&
+    session.map.palette && typeof session.map.palette.field === "string" && typeof session.map.palette.path === "string" && typeof session.map.palette.accent === "string" &&
+    Number.isFinite(session.map.mapScale) && Number.isFinite(session.map.rewardMultiplier) &&
+    session.mode && Array.isArray(session.mode.waves) && session.mode.waves.length > 0 && session.mode.waves.length <= 250 && wavesValid &&
+    Number.isFinite(session.mode.startingCash) && session.mode.startingCash >= 0 && Number.isFinite(session.mode.coreIntegrity) && session.mode.coreIntegrity > 0 && Number.isFinite(session.mode.multiplayerHitCashMultiplier) && session.mode.multiplayerHitCashMultiplier >= 0 && session.mode.multiplayerHitCashMultiplier <= 1 && session.mode.reward && Number.isFinite(session.mode.reward.coins) && Number.isFinite(session.mode.reward.tokens) &&
+    Array.isArray(session.players) && session.players.length === 2 &&
+    new Set(session.players.map((player) => player.id)).size === 2 &&
+    Array.isArray(session.customEnemies)
+  );
+}
+
+function sessionEnemyReferencesAvailable(mode: ModeDefinition, enemies: readonly CustomEnemyDraft[]): boolean {
+  const available = new Map(enemies.map((enemy) => [enemy.id, enemy]));
+  const pending: string[] = [];
+  mode.waves.forEach((wave) => {
+    wave.groups?.forEach((group) => pending.push(group.kind));
+    wave.blocks?.forEach((block) => pending.push(block.enemy));
+  });
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const kind = pending.pop();
+    if (!kind?.startsWith("custom-enemy:") || visited.has(kind)) continue;
+    visited.add(kind);
+    const enemy = available.get(kind as CustomEnemyDraft["id"]);
+    if (!enemy) return false;
+    enemy.summonKinds.forEach((summonKind) => pending.push(summonKind));
+  }
+  return true;
+}
+
+function beginGuestMultiplayerRun(session: MultiplayerSessionStart): void {
+  const players = session.players.map((player) => sanitizeMultiplayerPlayer(player, player.id));
+  const local = players.find((player) => player.id === localMultiplayerPlayer.id);
+  const remote = players.find((player) => player.id !== localMultiplayerPlayer.id);
+  if (!local || !remote) {
+    multiplayerSession.sendControl({ type: "error", message: "The host session does not contain this guest slot." });
+    addLog("Multiplayer start rejected // guest identity does not match the reserved slot.", "danger");
+    return;
+  }
+  const sessionEnemies = sanitizeCustomEnemies(session.customEnemies);
+  if (!sessionEnemyReferencesAvailable(session.mode, sessionEnemies)) {
+    multiplayerSession.sendControl({ type: "error", message: "Host content is missing a required custom enemy." });
+    addLog("Multiplayer start rejected // incomplete custom enemy snapshot.", "danger");
+    return;
+  }
+  setCustomEnemyRegistry(sessionEnemies);
+  guestSessionContentActive = true;
+  remoteMultiplayerPlayer = remote;
+  activeMultiplayerStart = { ...session, players };
+  activeMap = session.map;
+  activeMode = session.mode;
+  mapTestActive = false;
+  runSettled = false;
+  [mainMenu, multiplayerScreen, creatorHub, enemySelection, enemyCreator, modeSelection, mapSelection, mapLibrary, mapCreator, modeCreator, towerShop, gameOverPanel, victoryPanel]
+    .forEach((screen) => { screen.hidden = true; });
+  shell.classList.add("run-active");
+  game.configureMultiplayer("guest", local, players);
+  game.startRun(activeMap, local.loadout, activeMode);
+  addLog(`Linked to ${remote.username} // host-authoritative mirror online.`, "good");
+}
+
+function handleMultiplayerControl(message: MultiplayerControlMessage): void {
+  if (message.type === "hello") {
+    const peer = sanitizeMultiplayerPlayer(message.player, message.player.id);
+    if (peer.id === localMultiplayerPlayer.id) return;
+    if (multiplayerSession.role === "host" && activeMultiplayerStart) {
+      const reservedGuest = activeMultiplayerStart.players.find((player) => player.id !== localMultiplayerPlayer.id);
+      if (reservedGuest && reservedGuest.id !== peer.id) {
+        multiplayerSession.sendControl({ type: "error", message: "This active session is reserved for its original guest." });
+        return;
+      }
+    }
+    remoteMultiplayerPlayer = peer;
+    renderMultiplayerStatus(multiplayerSession.status, "Peer identity verified. Direct link ready.");
+    if (activeMultiplayerStart) game.updateMultiplayerPlayers([localMultiplayerPlayer, peer]);
+    if (multiplayerSession.role === "host" && activeMultiplayerStart) {
+      multiplayerSession.sendControl({ type: "session-start", session: activeMultiplayerStart });
+      const snapshot = game.createMultiplayerSnapshot(++multiplayerSequence);
+      if (snapshot) multiplayerSession.sendRealtime({ type: "snapshot", snapshot });
+      if (pendingMultiplayerResult) multiplayerSession.sendControl({ type: "result", result: pendingMultiplayerResult });
+      addLog(`${peer.username} reconnected // wallet, towers, and controls restored.`, "good");
+    }
+    return;
+  }
+  if (message.type === "command") {
+    if (multiplayerSession.role === "host" && remoteMultiplayerPlayer) {
+      if (!game.applyMultiplayerCommand(remoteMultiplayerPlayer.id, message.command)) {
+        multiplayerSession.sendControl({ type: "error", message: "The host rejected that action." });
+      }
+    }
+    return;
+  }
+  if (message.type === "session-start") {
+    if (multiplayerSession.role !== "guest" || !validSessionStart(message.session)) {
+      multiplayerSession.sendControl({ type: "error", message: "Invalid or incompatible session content snapshot." });
+      return;
+    }
+    beginGuestMultiplayerRun(message.session);
+    return;
+  }
+  if (message.type === "log" && multiplayerSession.role === "guest") {
+    addLog(message.message, message.tone);
+    return;
+  }
+  if (message.type === "result" && multiplayerSession.role === "guest") {
+    receiveMultiplayerResult(message.result);
+    return;
+  }
+  if (message.type === "end") {
+    if (multiplayerSession.role === "guest") {
+      game.leaveRun();
+      game.clearMultiplayer();
+      if (guestSessionContentActive) setCustomEnemyRegistry(customEnemies);
+      guestSessionContentActive = false;
+      activeMultiplayerStart = null;
+      window.alert(`Host ended the session: ${message.reason}`);
+      showFrontScreen("main");
+      multiplayerSession.close("Host ended the session.");
+    } else {
+      addLog("Guest left the direct link // host simulation continues.", "danger");
+    }
+    return;
+  }
+  if (message.type === "error") addLog(`Multiplayer // ${message.message}`, "danger");
+}
+
+function handleMultiplayerRealtime(message: MultiplayerRealtimeMessage): void {
+  if (message.type === "snapshot" && multiplayerSession.role === "guest") {
+    game.applyMultiplayerSnapshot(message.snapshot);
+  } else if (message.type === "cursor" && remoteMultiplayerPlayer) {
+    const point = message.point;
+    if (point === null || (Number.isFinite(point?.x) && Number.isFinite(point?.y))) game.setRemoteCursor(remoteMultiplayerPlayer, point);
+  }
+}
+
+function receiveMultiplayerResult(result: MultiplayerResult): void {
+  let claimed: string[] = [];
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(MULTIPLAYER_REWARD_KEY) ?? "[]") as unknown;
+    if (Array.isArray(stored)) claimed = stored.filter((value): value is string => typeof value === "string");
+  } catch {
+    claimed = [];
+  }
+  const alreadyClaimed = claimed.includes(result.id);
+  if (result.official && !alreadyClaimed) {
+    progress.coins += Math.max(0, Math.round(result.coins));
+    progress.tokens += Math.max(0, Math.round(result.tokens));
+    progress.runs += 1;
+    if (result.victory) {
+      progress.victories += 1;
+      const mapKind = result.mapKind as MapKind;
+      if (!progress.clearedMaps.some((kind) => kind === mapKind)) progress.clearedMaps.push(mapKind);
+    }
+    saveProgress(progress);
+    renderMeta();
+    try {
+      window.localStorage.setItem(MULTIPLAYER_REWARD_KEY, JSON.stringify([...claimed, result.id].slice(-50)));
+    } catch {
+      // The profile save still contains the applied reward.
+    }
+  }
+  runSettled = true;
+  if (result.victory) {
+    query<HTMLElement>("#victory-copy").textContent = result.official
+      ? `Co-op defense secured. Reward: ${alreadyClaimed ? "already claimed" : `${result.coins} Coins and ${result.tokens} Tokens`}.`
+      : "Co-op custom/sandbox defense secured. Profile rewards are disabled for this content.";
+    query<HTMLElement>("#victory h2").innerHTML = "CO-OP DEFENSE<br>SECURED";
+    query<HTMLElement>("#victory-exit").textContent = "LEAVE SESSION";
+    query<HTMLButtonElement>("#victory-restart").hidden = true;
+    victoryPanel.hidden = false;
+  } else {
+    query<HTMLElement>("#game-over-copy").textContent = result.official
+      ? `Co-op defense held through wave ${result.wave.toString().padStart(2, "0")}. Recovery paid ${alreadyClaimed ? "an already claimed result" : `${result.coins} Coins${result.tokens > 0 ? ` and ${result.tokens} Token` : ""}`}.`
+      : `Co-op sandbox simulation held through wave ${result.wave.toString().padStart(2, "0")}. No profile rewards were granted.`;
+    query<HTMLElement>("#game-over-exit").textContent = "LEAVE SESSION";
+    query<HTMLButtonElement>("#game-over-restart").hidden = true;
+    gameOverPanel.hidden = false;
+  }
+}
 const BATTLE_LOG_HIDDEN_KEY = "monochromium:battle-log-hidden";
 try {
   battleLog.hidden = window.localStorage.getItem(BATTLE_LOG_HIDDEN_KEY) === "1";
@@ -757,10 +1104,20 @@ const exportMapFile = (map: CustomMapDraft): void => {
   setSaveStatus(`Map "${map.name}" exported.`, "good");
 };
 
-const getAllMapDefinitions = (): MapDefinition[] => [
-  ...Object.values(MAP_DEFINITIONS),
-  ...customMaps.map(customMapToDefinition),
-];
+const getAllMapDefinitions = (): MapDefinition[] => {
+  let nextOfficialIndex = Object.keys(MAP_DEFINITIONS).length + 1;
+  return [
+    ...Object.values(MAP_DEFINITIONS),
+    ...customMaps.map(customMapToDefinition),
+  ].map((map) => {
+    if (map.isCustom) return map;
+    const indexed = { ...map, index: map.index > 0 ? map.index : nextOfficialIndex };
+    if (map.index === 0) nextOfficialIndex += 1;
+    return indexed;
+  });
+};
+
+const getOfficialMapDefinitions = (): MapDefinition[] => getAllMapDefinitions().filter((map) => !map.isCustom);
 
 const getMapDefinition = (kind: string): MapDefinition | null =>
   getAllMapDefinitions().find((map) => map.kind === kind) ?? null;
@@ -955,6 +1312,23 @@ const renderMeta = (): void => {
   query<HTMLElement>("#creator-mode-count").textContent = customModes.length.toString();
   query<HTMLElement>("#creator-enemy-count").textContent = customEnemies.length.toString();
   query<HTMLElement>("#creator-map-count").textContent = customMaps.length.toString();
+};
+
+const renderAudioSettings = (): void => {
+  const settings = audio.getSettings();
+  audioEnabledInput.checked = settings.enabled;
+  query<HTMLElement>("#audio-enabled-value").textContent = settings.enabled ? "ON" : "OFF";
+  query<HTMLElement>("#audio-enabled-value").classList.toggle("active", settings.enabled);
+  (Object.keys(settings) as Array<keyof AudioSettings>).forEach((key) => {
+    if (key === "enabled") return;
+    const input = query<HTMLInputElement>(`[data-audio-volume='${key}']`);
+    const output = query<HTMLOutputElement>(`#audio-value-${key}`);
+    input.value = settings[key].toString();
+    output.value = `${Math.round(settings[key] * 100)}%`;
+    output.textContent = output.value;
+  });
+  query<HTMLElement>("#sound-icon").textContent = settings.enabled ? "SND" : "OFF";
+  soundButton.setAttribute("aria-label", settings.enabled ? "Open sound settings" : "Open sound settings // audio muted");
 };
 
 const escapeHtml = (value: string): string => value.replace(/[&<>"]/g, (character) => ({
@@ -1180,7 +1554,7 @@ const renderModeList = (): void => {
     return `
     <article class="mode-entry${missingEnemies.length > 0 ? " missing-dependency-entry" : ""}">
       <div>
-        <small>CREATED // ${mode.waves.length} ${mode.waves.length === 1 ? "WAVE" : "WAVES"} // NO REWARDS</small>
+        <small>CREATED // ${mode.waves.length} ${mode.waves.length === 1 ? "WAVE" : "WAVES"} // ${Math.round(mode.multiplayerHitCashMultiplier * 100)}% MP HIT CASH // NO REWARDS</small>
         <strong>${escapeHtml(mode.name)}</strong>
         <p>${escapeHtml(mode.description)}</p>${dependencyNotice}
       </div>
@@ -1209,17 +1583,17 @@ const mapLibraryCard = (map: MapDefinition, custom: CustomMapDraft | null): stri
   <article class="map-library-card">
     ${mapPreviewSvg(map)}
     <div><small>${map.isCustom ? "CREATED // SANDBOX" : `OFFICIAL // MAP ${map.index.toString().padStart(2, "0")}`}</small><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><b>${map.difficulty.toUpperCase()} // ${Math.round(new Polyline(map.path).totalLength * normalizedMapScale(map.mapScale)).toLocaleString()} ROUTE UNITS // SCALE ${normalizedMapScale(map.mapScale).toFixed(1)}X // ${map.blockedZones.length} BLOCK ZONES</b></div>
-    ${custom ? `<div class="map-card-actions"><label class="library-select"><input type="checkbox" data-map-select="${escapeHtml(custom.id)}" ${selectedMapIds.has(custom.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-map" data-map-id="${escapeHtml(custom.id)}">EXPORT</button><button data-action="edit-map" data-map-id="${escapeHtml(custom.id)}">EDIT</button><button class="danger" data-action="delete-map" data-map-id="${escapeHtml(custom.id)}">DELETE</button></div>` : ""}
+    ${custom ? `<div class="map-card-actions"><label class="library-select"><input type="checkbox" data-map-select="${escapeHtml(custom.id)}" ${selectedMapIds.has(custom.id) ? "checked" : ""}><span>SELECT</span></label><button data-action="export-map" data-map-id="${escapeHtml(custom.id)}">EXPORT</button><button data-action="edit-map" data-map-id="${escapeHtml(custom.id)}">EDIT</button>${custom.official ? "" : `<button data-action="publish-map" data-map-id="${escapeHtml(custom.id)}">PUBLISH</button>`}<button class="danger" data-action="delete-map" data-map-id="${escapeHtml(custom.id)}">DELETE</button></div>` : ""}
   </article>`;
 
 const renderMapLibrary = (): void => {
   renderCreatorFolderBar("maps");
-  query<HTMLElement>("#official-map-list").innerHTML = Object.values(MAP_DEFINITIONS)
-    .map((map) => mapLibraryCard(map, null)).join("");
+  query<HTMLElement>("#official-map-list").innerHTML = getOfficialMapDefinitions()
+    .map((map) => mapLibraryCard(map, customMaps.find((draft) => draft.id === map.kind) ?? null)).join("");
   const list = query<HTMLElement>("#custom-map-list");
-  const visibleMaps = customMaps.filter((draft) => assetMatchesFolder("maps", draft.id, activeMapFolderId));
+  const visibleMaps = customMaps.filter((draft) => !draft.official && assetMatchesFolder("maps", draft.id, activeMapFolderId));
   list.innerHTML = visibleMaps.length === 0
-    ? `<div class="empty-mode-list"><strong>${customMaps.length === 0 ? "NO CREATED MAPS" : "FOLDER IS EMPTY"}</strong><span>${customMaps.length === 0 ? "Create a route, palette, and restricted build layout." : "Select another folder or move a map here."}</span></div>`
+    ? `<div class="empty-mode-list"><strong>${customMaps.some((map) => !map.official) ? "FOLDER IS EMPTY" : "NO SANDBOX MAPS"}</strong><span>${customMaps.some((map) => !map.official) ? "Select another folder or move a map here." : "New maps remain rewardless until they are published."}</span></div>`
     : visibleMaps.map((draft) => mapLibraryCard(customMapToDefinition(draft), draft)).join("");
   updateSelectedMapCount();
 };
@@ -1231,7 +1605,7 @@ const renderPlayMapGrid = (): void => {
     const rewardCopy = map.isCustom || selectedMode.isCustom
       ? "SANDBOX // NO PROFILE REWARDS"
       : `${Math.round(map.rewardMultiplier * 100)}% COIN REWARD`;
-    const cleared = !map.isCustom && progress.clearedMaps.some((kind) => kind === map.kind) ? "// CLEARED" : "";
+    const cleared = progress.clearedMaps.some((kind) => kind === map.kind) ? "// CLEARED" : "";
     return `<button class="map-card ${map.kind === selectedMap.kind ? "selected" : ""}" data-action="select-map" data-map="${escapeHtml(map.kind)}">${mapPreviewSvg(map)}<span>${map.isCustom ? "CUSTOM" : `MAP ${map.index.toString().padStart(2, "0")}`} // ${map.difficulty.toUpperCase()}</span><strong>${escapeHtml(map.name)}</strong><p>${escapeHtml(map.description)}</p><small>${rewardCopy} <b>${cleared}</b></small></button>`;
   }).join("");
 };
@@ -1252,6 +1626,9 @@ const renderCreator = (): void => {
   query<HTMLTextAreaElement>("[data-mode-field='description']").value = creatorDraft.description;
   query<HTMLInputElement>("[data-mode-field='startingCash']").value = creatorDraft.startingCash.toString();
   query<HTMLInputElement>("[data-mode-field='coreIntegrity']").value = creatorDraft.coreIntegrity.toString();
+  const multiplayerHitCashPercent = Math.round(creatorDraft.multiplayerHitCashMultiplier * 100);
+  query<HTMLInputElement>("[data-mode-field='multiplayerHitCashMultiplier']").value = multiplayerHitCashPercent.toString();
+  query<HTMLOutputElement>("#multiplayer-hitcash-value").textContent = `${multiplayerHitCashPercent}% // $${(creatorDraft.multiplayerHitCashMultiplier * ECONOMY_RULES.damageCashPerHp).toFixed(2)} PER 1 DAMAGE`;
   query<HTMLInputElement>("[data-wave-field='cashReward']").value = wave.cashReward.toString();
   query<HTMLElement>("#creator-wave-kicker").textContent = `WAVE ${(creatorWaveIndex + 1).toString().padStart(2, "0")}`;
   query<HTMLElement>("#creator-wave-list").innerHTML = creatorDraft.waves.map((candidate, index) => {
@@ -1576,9 +1953,12 @@ mapEditorCanvas.addEventListener("pointerup", finishMapDrag);
 mapEditorCanvas.addEventListener("pointercancel", finishMapDrag);
 mapEditorCanvas.addEventListener("dblclick", (event) => insertMapPointAt(mapCanvasPoint(event)));
 
-const showFrontScreen = (screen: "main" | "creators" | "enemies" | "enemy-creator" | "modes" | "maps" | "creator" | "map-library" | "map-creator" | "shop"): void => {
+const showFrontScreen = (screen: "main" | "multiplayer" | "creators" | "enemies" | "enemy-creator" | "modes" | "maps" | "creator" | "map-library" | "map-creator" | "shop"): void => {
   shell.classList.remove("run-active");
+  audioSettingsPanel.hidden = true;
+  soundButton.setAttribute("aria-expanded", "false");
   mainMenu.hidden = screen !== "main";
+  multiplayerScreen.hidden = screen !== "multiplayer";
   creatorHub.hidden = screen !== "creators";
   enemySelection.hidden = screen !== "enemies";
   enemyCreator.hidden = screen !== "enemy-creator";
@@ -1593,6 +1973,12 @@ const showFrontScreen = (screen: "main" | "creators" | "enemies" | "enemy-creato
   debugPanel.hidden = true;
   renderMeta();
   if (screen === "modes") renderModeList();
+  if (screen === "multiplayer") renderMultiplayerStatus(multiplayerSession.status);
+  if (screen === "multiplayer") {
+    multiplayerReturnRun.hidden = !activeMultiplayerStart;
+    const backButton = multiplayerScreen.querySelector<HTMLButtonElement>("[data-action='multiplayer-back']");
+    if (backButton) backButton.hidden = Boolean(activeMultiplayerStart);
+  }
   if (screen === "enemies") renderEnemyList();
   if (screen === "enemy-creator") renderEnemyCreator();
   if (screen === "maps") updateSelectedModeCopy();
@@ -1624,11 +2010,31 @@ const settleRun = (victory: boolean, wave: number, mode: ModeDefinition): { coin
   progress.runs += 1;
   if (victory) {
     progress.victories += 1;
-    if (!progress.clearedMaps.some((kind) => kind === activeMap.kind)) progress.clearedMaps.push(activeMap.kind as keyof typeof MAP_DEFINITIONS);
+    if (!progress.clearedMaps.some((kind) => kind === activeMap.kind)) progress.clearedMaps.push(activeMap.kind);
   }
   saveProgress(progress);
   renderMeta();
   return { coins, tokens };
+};
+
+const sendMultiplayerResult = (
+  victory: boolean,
+  wave: number,
+  reward: { coins: number; tokens: number },
+): void => {
+  if (multiplayerSession.role !== "host" || !activeMultiplayerStart) return;
+  const official = !activeMode.isCustom && !activeMap.isCustom && !mapTestActive;
+  pendingMultiplayerResult = {
+      id: `${multiplayerSession.sessionId}:${victory ? "victory" : "defeat"}:${wave}`,
+      victory,
+      wave,
+      coins: official ? reward.coins : 0,
+      tokens: official ? reward.tokens : 0,
+      official,
+      mapKind: activeMap.kind,
+      modeKind: activeMode.kind,
+  };
+  if (multiplayerSession.connected) multiplayerSession.sendControl({ type: "result", result: pendingMultiplayerResult });
 };
 
 const addLog = (message: string, tone: "neutral" | "good" | "danger" = "neutral"): void => {
@@ -1647,7 +2053,7 @@ const renderSelection = (state: GameUiState): void => {
   const upgradeAffordable = nextUpgradeCost !== undefined && (state.infiniteCash || state.shards >= nextUpgradeCost);
   const moveAffordable = state.infiniteCash || state.shards >= ECONOMY_RULES.relocationCost;
   const signature = view
-    ? `${view.tower.id}:${view.tower.level}:${view.tower.onPath}:${Math.ceil(view.tower.hp)}:${view.tower.engaged.size}:${view.tower.targeting}:${upgradeAffordable}:${moveAffordable}:${state.relocating}:${state.infiniteCash}`
+    ? `${view.tower.id}:${view.tower.level}:${view.tower.onPath}:${Math.ceil(view.tower.hp)}:${view.tower.engaged.size}:${view.tower.targeting}:${upgradeAffordable}:${moveAffordable}:${state.relocating}:${state.infiniteCash}:${state.selectedOwned}`
     : "none";
   if (signature === selectionSignature) return;
   selectionSignature = signature;
@@ -1707,7 +2113,7 @@ const renderSelection = (state: GameUiState): void => {
       <span class="selected-glyph">${definition.glyph}</span>
       <div><small>${mode} // ${definition.name.toUpperCase()}</small><strong>${form.title}</strong></div>
       <div class="level-pips" aria-label="Level ${tower.level} of ${maxLevel}">${Array.from({ length: definition.levels.length }, (_, level) => `<i class="${level <= tower.level ? "filled" : ""}"></i>`).join("")}</div>
-      <button data-action="sell" class="sell-button" title="Sell for $${Math.floor(tower.totalInvested * sellRate)}; this copy is not restored">⌁</button>
+      <button data-action="sell" class="sell-button" ${state.selectedOwned ? "" : "disabled"} title="${state.selectedOwned ? `Sell for $${Math.floor(tower.totalInvested * sellRate)}; this copy is not restored` : "Teammate-owned tower // read only"}">⌁</button>
     </div>
     <p class="selected-description">${form.description}</p>
     <div class="selected-stats">
@@ -1721,12 +2127,12 @@ const renderSelection = (state: GameUiState): void => {
         : `<div><span>RANGE</span><b>${range}</b></div>`}
     </div>
     <div class="trait-strip ${detectionLevel !== undefined && tower.level >= detectionLevel ? "online" : ""}">${detectionState}</div>
-    <button data-action="move" class="move-button" ${!moveAffordable ? "disabled" : ""}>
+    <button data-action="move" class="move-button" ${!moveAffordable || !state.selectedOwned ? "disabled" : ""}>
       <span>RELOCATE</span><b>${state.infiniteCash ? "FREE" : `$${ECONOMY_RULES.relocationCost}`}</b><small>Move on or off the path</small>
     </button>
     <div class="targeting-control">
       <span>TARGET PRIORITY</span>
-      <div>${targetingModes.map(({ value, label }) => `<button data-action="target" data-targeting="${value}" class="${tower.targeting === value ? "active" : ""}" title="Target ${value}">${label}</button>`).join("")}</div>
+      <div>${targetingModes.map(({ value, label }) => `<button data-action="target" data-targeting="${value}" class="${tower.targeting === value ? "active" : ""}" ${state.selectedOwned ? "" : "disabled"} title="Target ${value}">${label}</button>`).join("")}</div>
     </div>
     <div class="upgrade-panel ${nextUpgrade ? "" : "maxed"}">
       <div class="upgrade-copy">
@@ -1735,7 +2141,7 @@ const renderSelection = (state: GameUiState): void => {
         <small>${nextStats}</small>
       </div>
       ${nextUpgrade
-        ? `<button data-action="upgrade" data-testid="upgrade-button" ${!state.infiniteCash && state.shards < nextUpgrade.cost ? "disabled" : ""}><span>UPGRADE</span><b>${state.infiniteCash ? "FREE" : `$${nextUpgrade.cost}`}</b></button>`
+        ? `<button data-action="upgrade" data-testid="upgrade-button" ${!state.selectedOwned || (!state.infiniteCash && state.shards < nextUpgrade.cost) ? "disabled" : ""}><span>${state.selectedOwned ? "UPGRADE" : "TEAMMATE"}</span><b>${state.infiniteCash ? "FREE" : `$${nextUpgrade.cost}`}</b></button>`
         : `<strong class="max-level">MAX</strong>`}
     </div>
     ${tower.onPath
@@ -1775,6 +2181,11 @@ const renderBattleLoadout = (state: GameUiState): void => {
 };
 
 const render = (state: GameUiState): void => {
+  const debugButton = document.querySelector<HTMLButtonElement>("[data-action='debug']");
+  const multiplayerLinkButton = document.querySelector<HTMLButtonElement>("[data-action='multiplayer-link']");
+  if (debugButton) debugButton.hidden = state.multiplayer;
+  if (multiplayerLinkButton) multiplayerLinkButton.hidden = !state.multiplayer;
+  if (state.multiplayer) debugPanel.hidden = true;
   const selectedId = state.selectedTower?.tower.id ?? null;
   if (selectedId !== lastSelectedTowerId) {
     inspectorSuppressed = false;
@@ -1832,6 +2243,7 @@ const render = (state: GameUiState): void => {
   query<HTMLElement>("#brand-map-label").textContent = `${state.started ? state.mapName.toUpperCase() : "COMMAND"} // PATHBOUND DEFENSE`;
   query<HTMLElement>("#speed-label").textContent = `${state.speed}×`;
   query<HTMLElement>("#sound-icon").textContent = state.soundEnabled ? "SND" : "OFF";
+  soundButton.setAttribute("aria-label", state.soundEnabled ? "Open sound settings" : "Open sound settings // audio muted");
   query<HTMLElement>("#pause-icon").textContent = state.paused ? "▶" : "Ⅱ";
   query<HTMLDivElement>("#pause-banner").hidden = !state.paused;
   const enemyCount = query<HTMLElement>("#enemy-count");
@@ -1843,6 +2255,13 @@ const render = (state: GameUiState): void => {
       ? "THREAT: ACTIVE"
       : `NEXT WAVE: ${state.intermissionRemaining.toFixed(1)}s`;
   query<HTMLElement>("#threat-label").classList.toggle("danger", state.waveActive);
+  const multiplayerHud = query<HTMLElement>("#multiplayer-hud");
+  const teammate = state.teammates[0];
+  multiplayerHud.hidden = !state.multiplayer || !teammate;
+  if (teammate) {
+    multiplayerHud.textContent = `ALLY // ${teammate.username.toUpperCase()} // $${Math.floor(teammate.shards)}`;
+    multiplayerHud.style.color = teammate.color;
+  }
 
   const waveButton = query<HTMLElement>("#wave-button");
   waveButton.innerHTML = state.modeComplete
@@ -1891,8 +2310,8 @@ const render = (state: GameUiState): void => {
   const abilityUnlocked = Boolean(selected && selectedAbility && selected.tower.level >= selectedAbility.unlockLevel);
   const samuraiStanceActive = Boolean(selected?.tower.kind === "samurai" && selected.tower.abilityTimer > 0);
   const counterRecharging = Boolean(selected && selected.tower.counterCooldown > 0);
-  counter.disabled = !selected?.tower.onPath || counterRecharging || state.paused || Boolean(selected.tower.stunTimer > 0);
-  abilityButton.disabled = !abilityUnlocked || state.paused || Boolean(selected && selected.tower.stunTimer > 0) || Boolean(
+  counter.disabled = !state.selectedOwned || !selected?.tower.onPath || counterRecharging || state.paused || Boolean(selected.tower.stunTimer > 0);
+  abilityButton.disabled = !state.selectedOwned || !abilityUnlocked || state.paused || Boolean(selected && selected.tower.stunTimer > 0) || Boolean(
     selected && selected.tower.abilityCooldown > 0 && !samuraiStanceActive,
   );
   counter.classList.remove("live", "charging");
@@ -1966,9 +2385,23 @@ const render = (state: GameUiState): void => {
 
 const game = new Game(canvas, {
   onUi: render,
-  onLog: addLog,
+  onLog: (message, tone) => {
+    addLog(message, tone);
+    if (multiplayerSession.role === "host" && multiplayerSession.connected && activeMultiplayerStart) {
+      multiplayerSession.sendControl({ type: "log", message, tone });
+    }
+  },
+  onCursor: (point) => {
+    if (multiplayerSession.connected && activeMultiplayerStart) multiplayerSession.sendRealtime({ type: "cursor", point });
+  },
+  onCommand: (command) => {
+    if (multiplayerSession.role === "guest" && multiplayerSession.connected) {
+      multiplayerSession.sendControl({ type: "command", command });
+    }
+  },
   onGameOver: (wave) => {
     const reward = settleRun(false, wave, activeMode);
+    sendMultiplayerResult(false, wave, reward);
     query<HTMLElement>("#game-over-copy").textContent = mapTestActive
       ? `Map test ended on wave ${wave.toString().padStart(2, "0")}. Return to the editor to adjust the route.`
       : activeMode.isCustom || activeMap.isCustom
@@ -1976,10 +2409,18 @@ const game = new Game(canvas, {
       : `Your defense held through wave ${wave.toString().padStart(2, "0")}. Recovery paid ${reward.coins} Coins${reward.tokens > 0 ? ` and ${reward.tokens} Token` : ""}.`;
     query<HTMLElement>("#game-over-exit").textContent = mapTestActive ? "RETURN TO EDITOR" : "MAIN MENU";
     query<HTMLElement>("#game-over-restart").innerHTML = mapTestActive ? "TEST AGAIN <span>↻</span>" : "TRY AGAIN <span>↻</span>";
+    query<HTMLElement>("#game-over-exit").textContent = activeMultiplayerStart ? "END SESSION" : query<HTMLElement>("#game-over-exit").textContent;
+    query<HTMLButtonElement>("#game-over-restart").hidden = Boolean(activeMultiplayerStart);
     gameOverPanel.hidden = false;
+    if (activeMultiplayerStart && multiplayerSession.role === "host" && !multiplayerSession.connected) {
+      gameOverPanel.hidden = true;
+      showFrontScreen("multiplayer");
+      renderMultiplayerStatus("disconnected", "Run complete. Re-pair the reserved guest before ending the session to deliver their result.");
+    }
   },
   onVictory: (mode) => {
     const reward = settleRun(true, mode.waves.length, mode);
+    sendMultiplayerResult(true, mode.waves.length, reward);
     query<HTMLElement>("#victory-copy").textContent = mapTestActive
       ? `${activeMap.name} passed a complete Normal Mode test. No profile rewards were granted.`
       : mode.isCustom || activeMap.isCustom
@@ -1988,12 +2429,26 @@ const game = new Game(canvas, {
     query<HTMLElement>("#victory h2").innerHTML = `${escapeHtml(mode.name.toUpperCase())}<br>SECURED`;
     query<HTMLElement>("#victory-exit").textContent = mapTestActive ? "RETURN TO EDITOR" : "MAIN MENU";
     query<HTMLElement>("#victory-restart").innerHTML = mapTestActive ? "TEST AGAIN <span>↻</span>" : "RUN AGAIN <span>↻</span>";
+    query<HTMLElement>("#victory-exit").textContent = activeMultiplayerStart ? "END SESSION" : query<HTMLElement>("#victory-exit").textContent;
+    query<HTMLButtonElement>("#victory-restart").hidden = Boolean(activeMultiplayerStart);
     victoryPanel.hidden = false;
+    if (activeMultiplayerStart && multiplayerSession.role === "host" && !multiplayerSession.connected) {
+      victoryPanel.hidden = true;
+      showFrontScreen("multiplayer");
+      renderMultiplayerStatus("disconnected", "Run complete. Re-pair the reserved guest before ending the session to deliver their result.");
+    }
   },
-});
+}, audio);
 
 game.setAvailableTowers(progress.loadout);
 renderMeta();
+renderAudioSettings();
+
+const multiplayerSnapshotTimer = window.setInterval(() => {
+  if (multiplayerSession.role !== "host" || !multiplayerSession.connected || !activeMultiplayerStart) return;
+  const snapshot = game.createMultiplayerSnapshot(++multiplayerSequence);
+  if (snapshot) multiplayerSession.sendRealtime({ type: "snapshot", snapshot });
+}, 1000 / MULTIPLAYER_SNAPSHOT_HZ);
 
 const hydrateDiskPersistence = async (): Promise<void> => {
   if (!hasDiskSaveApi()) {
@@ -2116,7 +2571,8 @@ const importMapFromFile = async (file: File): Promise<void> => {
     renderMapLibrary();
     renderPlayMapGrid();
     renderMeta();
-    addLog(`${imported.length} custom ${imported.length === 1 ? "map" : "maps"} imported // sandbox rewards disabled.`, "good");
+    const publishedCount = imported.filter((map) => map.official).length;
+    addLog(`${imported.length} ${imported.length === 1 ? "map" : "maps"} imported${publishedCount > 0 ? ` // ${publishedCount} official` : " // sandbox rewards disabled"}.`, "good");
     setSaveStatus(`${imported.length} ${imported.length === 1 ? "map" : "maps"} imported.`, "good");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Invalid map export.";
@@ -2130,14 +2586,146 @@ const enterRun = (map: MapDefinition, mode: ModeDefinition, test: boolean): void
   activeMode = mode;
   mapTestActive = test;
   runSettled = false;
-  [mainMenu, creatorHub, enemySelection, enemyCreator, modeSelection, mapSelection, mapLibrary, mapCreator, modeCreator, towerShop, gameOverPanel, victoryPanel]
+  query<HTMLButtonElement>("#game-over-restart").hidden = false;
+  query<HTMLButtonElement>("#victory-restart").hidden = false;
+  [mainMenu, multiplayerScreen, creatorHub, enemySelection, enemyCreator, modeSelection, mapSelection, mapLibrary, mapCreator, modeCreator, towerShop, gameOverPanel, victoryPanel]
     .forEach((screen) => { screen.hidden = true; });
   shell.classList.add("run-active");
-  game.startRun(activeMap, progress.loadout, activeMode);
+  if (multiplayerHostSelecting && multiplayerSession.role === "host" && multiplayerSession.connected && remoteMultiplayerPlayer) {
+    persistMultiplayerPlayer();
+    const players = [localMultiplayerPlayer, remoteMultiplayerPlayer];
+    const requiredEnemyIds = new Set(getRequiredCustomEnemyIds(activeMode));
+    activeMultiplayerStart = {
+      id: multiplayerSession.sessionId,
+      map: activeMap,
+      mode: activeMode,
+      customEnemies: customEnemies.filter((enemy) => requiredEnemyIds.has(enemy.id)),
+      players,
+    };
+    multiplayerSequence = 0;
+    pendingMultiplayerResult = null;
+    game.configureMultiplayer("host", localMultiplayerPlayer, players);
+    game.startRun(activeMap, localMultiplayerPlayer.loadout, activeMode);
+    multiplayerSession.sendControl({ type: "session-start", session: activeMultiplayerStart });
+    multiplayerHostSelecting = false;
+  } else {
+    game.clearMultiplayer();
+    game.startRun(activeMap, progress.loadout, activeMode);
+  }
+};
+
+const setAudioPanelOpen = (open: boolean): void => {
+  audioSettingsPanel.hidden = !open;
+  soundButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) {
+    void audio.unlock();
+    audio.uiOpen();
+    renderAudioSettings();
+  } else {
+    audio.uiClick();
+  }
+};
+
+const isAudioBus = (value: string | undefined): value is AudioBus =>
+  value === "towers" || value === "enemies" || value === "ui" || value === "ambience";
+
+const multiplayerFailure = (error: unknown): void => {
+  const message = error instanceof Error ? error.message : "Unknown multiplayer error.";
+  renderMultiplayerStatus("failed", message);
+  addLog(`Multiplayer // ${message}`, "danger");
+};
+
+const createMultiplayerOffer = async (): Promise<void> => {
+  try {
+    persistMultiplayerPlayer();
+    const code = await multiplayerSession.createHostOffer();
+    query<HTMLTextAreaElement>("#multiplayer-host-offer").value = code;
+  } catch (error) {
+    multiplayerFailure(error);
+  }
+};
+
+const createMultiplayerAnswer = async (): Promise<void> => {
+  try {
+    persistMultiplayerPlayer();
+    const offer = query<HTMLTextAreaElement>("#multiplayer-guest-offer").value;
+    const code = await multiplayerSession.acceptHostOffer(offer);
+    query<HTMLTextAreaElement>("#multiplayer-guest-answer").value = code;
+  } catch (error) {
+    multiplayerFailure(error);
+  }
+};
+
+const applyMultiplayerAnswer = async (): Promise<void> => {
+  try {
+    await multiplayerSession.acceptGuestAnswer(query<HTMLTextAreaElement>("#multiplayer-host-answer").value);
+  } catch (error) {
+    multiplayerFailure(error);
+  }
+};
+
+const copyMultiplayerCode = async (targetId: string | undefined): Promise<void> => {
+  if (!targetId) return;
+  const field = document.getElementById(targetId);
+  if (!(field instanceof HTMLTextAreaElement) || !field.value) return;
+  try {
+    await navigator.clipboard.writeText(field.value);
+  } catch {
+    field.focus();
+    field.select();
+    document.execCommand("copy");
+  }
+  addLog("Pairing code copied to clipboard.", "good");
+};
+
+const closeMultiplayerSession = (reason: string): void => {
+  multiplayerSession.close(reason);
+  remoteMultiplayerPlayer = null;
+  activeMultiplayerStart = null;
+  multiplayerHostSelecting = false;
+  multiplayerSequence = 0;
+  pendingMultiplayerResult = null;
+  game.clearMultiplayer();
+  if (guestSessionContentActive) setCustomEnemyRegistry(customEnemies);
+  guestSessionContentActive = false;
+  renderMultiplayerStatus("closed", reason);
 };
 
 const runAction = (action: string, value?: string, source?: HTMLElement): void => {
   switch (action) {
+    case "open-multiplayer":
+      persistMultiplayerPlayer();
+      showFrontScreen("multiplayer");
+      break;
+    case "multiplayer-link":
+      showFrontScreen("multiplayer");
+      break;
+    case "multiplayer-return-run":
+      multiplayerScreen.hidden = true;
+      shell.classList.add("run-active");
+      break;
+    case "multiplayer-create-offer":
+      void createMultiplayerOffer();
+      break;
+    case "multiplayer-create-answer":
+      void createMultiplayerAnswer();
+      break;
+    case "multiplayer-apply-answer":
+      void applyMultiplayerAnswer();
+      break;
+    case "multiplayer-copy":
+      void copyMultiplayerCode(source?.dataset["copyTarget"]);
+      break;
+    case "multiplayer-choose-mode":
+      if (multiplayerSession.role !== "host" || !multiplayerSession.connected || !remoteMultiplayerPlayer) break;
+      multiplayerHostSelecting = true;
+      libraryReturnScreen = "multiplayer";
+      showFrontScreen("modes");
+      break;
+    case "multiplayer-back":
+      if (multiplayerSession.status !== "idle" && multiplayerSession.status !== "closed") closeMultiplayerSession("Pairing cancelled.");
+      showFrontScreen("main");
+      break;
     case "open-modes":
       libraryReturnScreen = "main";
       showFrontScreen("modes");
@@ -2493,6 +3081,22 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       if (map) exportMapFile(map);
       break;
     }
+    case "publish-map": {
+      const map = customMaps.find((candidate) => candidate.id === source?.dataset["mapId"]);
+      if (!map || map.official) break;
+      customMaps = customMaps.map((candidate) => candidate.id === map.id
+        ? { ...candidate, official: true, updatedAt: Date.now() }
+        : candidate);
+      saveCustomMaps(customMaps);
+      const publishedMap = customMaps.find((candidate) => candidate.id === map.id);
+      if (publishedMap) selectedMap = customMapToDefinition(publishedMap);
+      renderMapLibrary();
+      renderPlayMapGrid();
+      renderMeta();
+      addLog(`Map "${map.name}" published // official rewards enabled.`, "good");
+      setSaveStatus(`Map "${map.name}" published.`, "good");
+      break;
+    }
     case "export-selected-maps": {
       const selected = customMaps.filter((map) => selectedMapIds.has(map.id));
       if (selected.length > 0) exportMapBundle(selected, `monochromium-maps-${selected.length}.json`);
@@ -2522,7 +3126,7 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       customMaps = upsertCustomMap(customMaps, mapDraft);
       const savedMap = customMaps.find((map) => map.id === mapDraft?.id) ?? mapDraft;
       selectedMap = customMapToDefinition(savedMap);
-      addLog(`Map "${savedMap.name}" saved // sandbox rewards disabled.`, "good");
+      addLog(`Map "${savedMap.name}" saved${savedMap.official ? " // official rewards enabled" : " // sandbox rewards disabled"}.`, "good");
       mapDraft = null;
       mapHistory = [];
       mapFuture = [];
@@ -2620,7 +3224,11 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       break;
       }
     case "main-menu":
+      if (activeMultiplayerStart && multiplayerSession.role === "host" && !window.confirm("End this multiplayer session permanently? The guest slot cannot reconnect after it ends.")) break;
       game.leaveRun();
+      if (activeMultiplayerStart) {
+        closeMultiplayerSession(multiplayerSession.role === "host" ? "Host ended the session." : "Guest left the session.");
+      }
       if (mapTestActive && mapDraft) {
         mapTestActive = false;
         showFrontScreen("map-creator");
@@ -2635,6 +3243,9 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
         if (unlockTower(progress, kind)) {
           game.setAvailableTowers(progress.loadout);
           addLog(`${TOWER_DEFINITIONS[kind].name} permanently unlocked${progress.loadout.includes(kind) ? " and equipped" : ""}.`, "good");
+          audio.uiConfirm();
+        } else {
+          audio.uiError();
         }
         renderMeta();
       }
@@ -2646,13 +3257,19 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
         if (result === "equipped" || result === "unequipped") {
           game.setAvailableTowers(progress.loadout);
           addLog(`${TOWER_DEFINITIONS[kind].name} ${result === "equipped" ? "equipped to" : "removed from"} the active loadout.`, "good");
+          audio.uiConfirm();
         } else if (result === "full") {
           addLog("Loadout full // remove an equipped tower before adding another.", "danger");
+          audio.uiError();
         }
         renderMeta();
       }
       break;
     case "restart":
+      if (activeMultiplayerStart) {
+        addLog("Multiplayer runs can only be restarted by creating a new host session.", "danger");
+        break;
+      }
       gameOverPanel.hidden = true;
       victoryPanel.hidden = true;
       runSettled = false;
@@ -2664,8 +3281,18 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
     case "speed":
       game.cycleSpeed();
       break;
-    case "sound":
-      game.toggleSound();
+    case "sound-settings":
+      setAudioPanelOpen(Boolean(audioSettingsPanel.hidden));
+      break;
+    case "audio-settings-close":
+      setAudioPanelOpen(false);
+      break;
+    case "audio-reset":
+      audio.resetSettings();
+      renderAudioSettings();
+      game.refreshAudioState();
+      audio.uiConfirm();
+      setSaveStatus("Audio mix reset to defaults.", "good");
       break;
     case "debug":
       debugPanel.hidden = !debugPanel.hidden;
@@ -2713,6 +3340,15 @@ const runAction = (action: string, value?: string, source?: HTMLElement): void =
       renderMeta();
       addLog("Debug // every tower permanently unlocked.", "good");
       break;
+    case "debug-reset-progress":
+      if (!window.confirm("Reset progression data? This will remove Coins, Tokens, tower unlocks, loadout changes, victories, runs, and map clears. Custom maps, modes, enemies, and folders will be kept.")) break;
+      progress = resetProgress();
+      game.setAvailableTowers(progress.loadout);
+      renderMeta();
+      debugPanel.hidden = true;
+      addLog("Debug // progression reset. Creator content was preserved.", "good");
+      setSaveStatus("Progression reset // creator content preserved.", "good");
+      break;
     case "counter":
       game.counterSelected();
       break;
@@ -2752,10 +3388,19 @@ app.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const actionable = target.closest<HTMLElement>("[data-action], [data-kind]");
   if (!actionable) return;
+  void audio.unlock();
   const kind = actionable.dataset["kind"];
   const targeting = actionable.dataset["targeting"];
   const value = targeting ?? kind ?? actionable.dataset["map"] ?? actionable.dataset["towerKind"];
-  runAction(actionable.dataset["action"] ?? (kind ? "select" : ""), value, actionable);
+  const action = actionable.dataset["action"] ?? (kind ? "select" : "");
+  if (action !== "sound-settings" && action !== "audio-settings-close" && action !== "audio-reset") audio.uiClick();
+  runAction(action, value, actionable);
+});
+
+window.addEventListener("pointerdown", (event) => {
+  if (audioSettingsPanel.hidden) return;
+  const target = event.target as Node;
+  if (!audioSettingsPanel.contains(target) && !soundButton.contains(target)) setAudioPanelOpen(false);
 });
 
 app.addEventListener("submit", (event) => {
@@ -2767,6 +3412,18 @@ app.addEventListener("submit", (event) => {
 
 app.addEventListener("input", (event) => {
   const field = event.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+  if (field.id === "multiplayer-username" || field.id === "multiplayer-color") {
+    persistMultiplayerPlayer();
+    return;
+  }
+  const audioBus = field.dataset["audioVolume"];
+  if (isAudioBus(audioBus)) {
+    audio.setVolume(audioBus, Number(field.value));
+    renderAudioSettings();
+    game.refreshAudioState();
+    audio.uiClick();
+    return;
+  }
   const balancePath = field.dataset["balancePath"];
   if (balanceDraft && balancePath) {
     const value = Number(field.value);
@@ -2871,6 +3528,11 @@ app.addEventListener("input", (event) => {
   else if (modeField === "description") creatorDraft.description = field.value;
   else if (modeField === "startingCash") creatorDraft.startingCash = Math.max(0, Math.round(Number(field.value) || 0));
   else if (modeField === "coreIntegrity") creatorDraft.coreIntegrity = Math.max(1, Math.round(Number(field.value) || 1));
+  else if (modeField === "multiplayerHitCashMultiplier") {
+    const percent = clamp(Number(field.value) || 0, 0, 100);
+    creatorDraft.multiplayerHitCashMultiplier = percent / 100;
+    query<HTMLOutputElement>("#multiplayer-hitcash-value").textContent = `${Math.round(percent)}% // $${(creatorDraft.multiplayerHitCashMultiplier * ECONOMY_RULES.damageCashPerHp).toFixed(2)} PER 1 DAMAGE`;
+  }
 
   const wave = creatorDraft.waves[creatorWaveIndex];
   if (!wave) return;
@@ -2890,6 +3552,13 @@ app.addEventListener("input", (event) => {
 
 app.addEventListener("change", (event) => {
   const field = event.target as HTMLInputElement | HTMLSelectElement;
+  if (field instanceof HTMLInputElement && field.dataset["audioEnabled"] !== undefined) {
+    audio.setSettings({ enabled: field.checked });
+    renderAudioSettings();
+    game.refreshAudioState();
+    if (field.checked) audio.uiConfirm();
+    return;
+  }
   const enemyId = field.dataset["enemySelect"];
   if (field instanceof HTMLInputElement && enemyId) {
     if (field.checked) selectedEnemyIds.add(enemyId);
@@ -2975,13 +3644,19 @@ query<HTMLInputElement>("#map-import-input").addEventListener("change", async (e
 
 window.addEventListener("keydown", (event) => {
   if (event.repeat) return;
+  if (event.key === "Escape" && !audioSettingsPanel.hidden) {
+    event.preventDefault();
+    setAudioPanelOpen(false);
+    return;
+  }
   if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement) return;
+  void audio.unlock();
   if (event.key === "Tab") {
     event.preventDefault();
     toggleBattleLog();
   } else if (event.key === "F1") {
     event.preventDefault();
-    debugPanel.hidden = !debugPanel.hidden;
+    if (!activeMultiplayerStart) debugPanel.hidden = !debugPanel.hidden;
   } else if (event.code === "Space") {
     event.preventDefault();
     game.counterSelected();
@@ -3018,5 +3693,7 @@ window.setInterval(() => {
 
 window.addEventListener("beforeunload", () => {
   stopUpdateStateSubscription?.();
+  window.clearInterval(multiplayerSnapshotTimer);
+  if (multiplayerSession.status !== "closed" && multiplayerSession.status !== "idle") multiplayerSession.close("Window closed.");
   game.destroy();
 });

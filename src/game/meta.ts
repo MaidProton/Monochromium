@@ -1,6 +1,6 @@
 import { MAP_DEFINITIONS, TOWER_DEFINITIONS, TOWER_ORDER } from "./config.ts";
 import { saveDiskSection } from "./persistence.ts";
-import type { OfficialMapKind, TowerKind } from "./types.ts";
+import type { MapKind, TowerKind } from "./types.ts";
 
 const STORAGE_KEY = "monochromium.meta.v1";
 
@@ -10,7 +10,7 @@ export interface MetaProgress {
   tokens: number;
   unlockedTowers: TowerKind[];
   loadout: TowerKind[];
-  clearedMaps: OfficialMapKind[];
+  clearedMaps: MapKind[];
   runs: number;
   victories: number;
 }
@@ -44,10 +44,14 @@ const sanitizeLoadout = (value: unknown, unlockedTowers: readonly TowerKind[]): 
   return fallback;
 };
 
-const uniqueKnownMaps = (value: unknown): OfficialMapKind[] => {
+const isPersistableMapKind = (kind: string): kind is MapKind => {
+  if (kind.startsWith("custom-map:")) return kind.length > "custom-map:".length;
+  return Object.prototype.hasOwnProperty.call(MAP_DEFINITIONS, kind);
+};
+
+const uniqueKnownMaps = (value: unknown): MapKind[] => {
   if (!Array.isArray(value)) return [];
-  const known = new Set(Object.keys(MAP_DEFINITIONS) as OfficialMapKind[]);
-  return [...new Set(value.filter((kind): kind is OfficialMapKind => typeof kind === "string" && known.has(kind as OfficialMapKind)))];
+  return [...new Set(value.filter((kind): kind is MapKind => typeof kind === "string" && isPersistableMapKind(kind)))];
 };
 
 const safeNumber = (value: unknown): number =>
@@ -89,6 +93,12 @@ export const cacheProgressLocally = (progress: MetaProgress): void => {
 export const saveProgress = (progress: MetaProgress): void => {
   cacheProgressLocally(progress);
   void saveDiskSection("meta", progress);
+};
+
+export const resetProgress = (): MetaProgress => {
+  const progress = freshProgress();
+  saveProgress(progress);
+  return progress;
 };
 
 export const unlockTower = (progress: MetaProgress, kind: TowerKind): boolean => {

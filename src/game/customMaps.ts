@@ -13,6 +13,8 @@ export type MapEdge = "left" | "right" | "top" | "bottom";
 export interface CustomMapDraft {
   version: 1;
   id: CustomMapKind;
+  /** Existing maps predate publication and are promoted during sanitization. */
+  official: boolean;
   name: string;
   description: string;
   difficulty: "Easy" | "Medium" | "Hard";
@@ -92,6 +94,7 @@ export const createBlockedZone = (x = 680, y = 270): BlockedZone => ({
 export const createCustomMap = (): CustomMapDraft => ({
   version: 1,
   id: createId(),
+  official: false,
   name: "Untitled Map",
   description: "A custom sandbox battlefield.",
   difficulty: "Medium",
@@ -201,6 +204,9 @@ const sanitizeMap = (value: unknown): CustomMapDraft | null => {
   const draft: CustomMapDraft = {
     version: 1,
     id: typeof source.id === "string" && source.id.startsWith("custom-map:") ? source.id as CustomMapKind : createId(),
+    // Maps created before publication support had no flag; promote those maps
+    // on load so the existing library becomes an official map roster.
+    official: source.official !== false,
     name: safeText(source.name, "Untitled Map", 48),
     description: safeText(source.description, "A custom sandbox battlefield.", 220),
     difficulty: source.difficulty === "Easy" || source.difficulty === "Medium" || source.difficulty === "Hard" ? source.difficulty : "Medium",
@@ -275,10 +281,12 @@ export const customMapToDefinition = (draft: CustomMapDraft): MapDefinition => {
     kind: draft.id,
     name: draft.name,
     index: 0,
-    isCustom: true,
+    isCustom: !draft.official,
     difficulty: draft.difficulty,
     description: draft.description,
-    rewardMultiplier: 1,
+    rewardMultiplier: draft.official
+      ? draft.difficulty === "Hard" ? 1.3 : draft.difficulty === "Medium" ? 1.15 : 1
+      : 1,
     mapScale: numberInRange(draft.mapScale, DEFAULT_MAP_SCALE, MAP_SCALE_MIN, MAP_SCALE_MAX),
     path: draft.path.map((point) => ({ ...point })),
     core,

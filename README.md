@@ -71,14 +71,16 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 
 - The main menu provides map selection, a permanent tower shop, the Mode Creator, and the Enemy Creator. Profile Coins, Tokens, unlocked towers, run totals, victories, cleared maps, custom modes, and custom enemies are saved to the local JSON file when launched with `launch_game.py`.
 - The Mode List separates official modes from locally created modes. Created modes never award profile Coins or Tokens.
-- The Mode Creator saves custom finite modes to the same local JSON file. It supports any number of waves, configurable starting cash/core integrity, and a cash-clear reward for every wave.
+- The Mode Creator saves custom finite modes to the same local JSON file. It supports any number of waves, configurable starting cash/core integrity, a 0–100% multiplayer hit-cash slider, and a cash-clear reward for every wave. Older modes without the setting load at the 75% default.
 - Browser local storage remains a fallback for direct `npm run dev` sessions. The launcher migrates an existing browser save when no disk save exists.
 - **Export Save** downloads a portable JSON backup; **Import Save** validates and restores one. Importing also updates the on-disk save when the launcher service is active.
+- Procedural audio is generated at runtime with Tone.js. Click **SND** during a run to open the mixer: master, tower, enemy, UI, and ambience buses each have independent sliders, and **SOUND ENABLED** mutes/unmutes without losing the mix. Preferences are stored separately in browser local storage and safely fall back to defaults if the stored value is invalid.
+- `src/game/audio.ts` owns the shared audio graph: category gain buses feed the master gain and final limiter, while small capped synth pools provide tower variants, enemy signatures, UI feedback, stingers, and a restrained battlefield drone. Audio context startup is deferred until a click, key, or battlefield pointer gesture, and rapid voices are throttled to avoid runaway node creation.
 - The Enemy List can export one custom enemy or a selected bulk bundle as JSON, and import those bundles later. The Mode List exports one custom mode per JSON file and can import it on another installation.
 - Imported modes preserve their custom-enemy references. A mode that references an unavailable custom enemy is visibly locked and cannot start until that enemy is imported; deleting an enemy leaves dependent modes locked instead of silently replacing the enemy.
 - The Creator Hub groups the Mode, Enemy, and Map creators behind one main-menu entry.
-- The Map Creator provides a live 1600×700 route editor with draggable edge terminals, route points, palette presets, rectangular no-build zones, undo/redo, validation, and rewardless unsaved playtests. Custom maps export and import one map per JSON file.
-- Runs on custom maps are sandboxed: they never award profile currency, victories, run totals, or official map clears.
+- The Map Creator provides a live 1600×700 route editor with draggable edge terminals, route points, palette presets, rectangular no-build zones, undo/redo, validation, and rewardless unsaved playtests. Existing saved maps are promoted into the official map roster automatically; new maps remain sandboxed until published. Maps export and import one map per JSON file.
+- Published maps can be used with official modes and award profile Coins, Tokens, victories, run totals, and map clears using their difficulty-based reward multiplier. Unsaved playtests and unpublished maps remain rewardless.
 - Creator waves are block-based. Enemy Group blocks choose an enemy, amount, spawn delay, and time until the next block starts; each group's spawning continues asynchronously when later blocks begin.
 - The Enemy Creator separates read-only official enemies from editable local enemies. A custom enemy can use a 3-12 sided polygon, any color/name, custom HP, shield HP, speed, tower damage, attack timing, telegraph timing, core damage, body radius, Hidden status, and an optional boss healthbar.
 - Shield HP is a separate yellow damage buffer. Damage removes shield first, excess damage is discarded instead of bleeding into HP, and shield damage does not award hitcash.
@@ -96,7 +98,7 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 - Normal Mode starts with $500 cash.
 - Normal Mode includes its full enemy lineup, Hidden detection, Dummymancer summons, a wave-19 Necromancer Boss, and Big Dummy's tower-stunning shockwave. Necromancer Boss and Big Dummy use global boss health bars.
 - Mercenary adds Onslaught, Infernus applies cone burn/slow, Bomber plants path charges and gains Time Bomb, and Warrior gains broad melee arcs, timed regeneration, delayed Double Strike, and a max-level relocation slash.
-- Each point of actual enemy damage awards $1 hitcash; overkill does not pay. Wave clears award `$50 + $10 × wave`.
+- In solo play, each point of actual enemy damage awards $1 hitcash; overkill does not pay. Wave clears award `$50 + $10 × wave`.
 - Relocating a selected tower costs $200 and can switch it between pathbound and ranged forms without consuming another copy.
 - A destroyed tower recovers 65% of its purchase-and-upgrade value: half immediately and half when the next wave begins.
 - Every tower has four permanent copies per run. Destroyed or sold copies do not return.
@@ -106,15 +108,36 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 - Infernus uses a reusable cone-spray particle system whose rotating square particles transition from yellow to red; future frost, poison, or breath attacks can reuse it with different colors.
 - Waves start automatically after a 3-second intermission. **1–9/0** select unlocked constructs, **Tab** toggles the persistent battle log, **P** pauses, **F1** opens debug tools, and **Esc** cancels placement.
 
+## Peer-to-peer multiplayer
+
+Multiplayer is two-player cooperative defense over browser-native WebRTC DataChannels. There is no dedicated gameplay server or account service: one player is the host and runs the authoritative enemy, damage, economy, and wave simulation. The guest sends requested actions and renders sequenced host snapshots; stale snapshots are discarded and enemy motion is interpolated between updates.
+
+To connect:
+
+1. Both players open **MULTIPLAYER // P2P**, choose a username and color, and keep the game open.
+2. The host creates an offer and sends the complete code to the guest through any trusted chat.
+3. The guest pastes that offer, creates an answer, and sends the complete answer back.
+4. The host pastes and applies the answer. Once both sides show **CONNECTED**, the host chooses the mode and map.
+
+Pairing uses non-trickle ICE, so each copied code already contains the gathered connection candidates. The default configuration uses public Google STUN endpoints for NAT discovery. STUN is a network service but does not carry gameplay data. No TURN relay is configured; connections can fail when either player is behind restrictive or symmetric NAT. A literally service-free setup is therefore limited to peers whose local/LAN candidates can reach each other. Pairing codes can contain network-candidate information and should only be shared with the intended player.
+
+Each player starts with the mode's full normal cash, has their own tower stock and wallet, owns only the towers they deploy, and receives the full wave-clear reward. Damage hit cash is credited to the owning damage source using the mode's multiplayer hit-cash percentage, including projectiles, splash, burns, bombs, delayed attacks, lightning, counters, and abilities. The default is 75%, meaning each point of actual damage accumulates $0.75 hit cash. A colored owner ring and label mark teammate towers; they can be inspected but not moved, sold, targeted, upgraded, countered, or activated by the other player.
+
+Both players can request pause and speed changes; the host applies requests in reliable arrival order. Map/mode choice, debug commands, and permanent session ending are host-only. Host custom maps, modes, and required custom enemies are sent as in-memory session content and do not alter the guest's saved creator library.
+
+If the guest disconnects, the host battle continues and the guest's wallet and towers remain active. Open **LNK** during the run and repeat the offer/answer exchange to reconnect the same guest identity and restore control. The host can deliver a completed run result after that reconnection as long as the host has not ended the session. Once the host ends it, the guest slot is permanently closed. With no profile server, a guest who is still disconnected when the host ends the session cannot receive or apply that result.
+
+Official content grants each connected player the normal local profile reward from the host's final result. Custom and sandbox restrictions are unchanged. Result IDs are remembered locally to prevent the same reconnect result from being claimed twice; as with any serverless peer-hosted game, there is no central anti-cheat authority beyond trusting the host.
+
 ## Balancing and customization
 
 All editable gameplay definitions are grouped in [`src/game/config.ts`](src/game/config.ts):
 
 - `ENEMY_DEFINITIONS` gives every enemy its own name, base HP, shield HP, speed, tower damage, attack/telegraph timing, core damage, radius, and assigned sprite colors/shape/glyph.
-- `ECONOMY_RULES` contains hitcash, wave stipend, relocation cost, and casualty-refund tuning.
+- `ECONOMY_RULES` contains solo hitcash, wave stipend, relocation cost, and casualty-refund tuning. Each `ModeDefinition` contains its own multiplayer hit-cash multiplier.
 - `COMBAT_RULES` contains the shared counter window and successful-counter cooldown.
 - `TOWER_DEFINITIONS` contains every tower's price, copy limit, forms, level stats, counter signature, active ability, and upgrade costs/skills.
-- `MAP_DEFINITIONS` contains immutable official maps. Custom-map validation, conversion, and persistence live in `src/game/customMaps.ts`, while shared battlefield/editor drawing lives in `src/game/mapRendering.ts`.
+- `MAP_DEFINITIONS` contains the built-in official maps. Custom-map validation, publication-aware conversion, and persistence live in `src/game/customMaps.ts`, while shared battlefield/editor drawing lives in `src/game/mapRendering.ts`.
 - `NORMAL_MODE` contains starting resources, rewards, and the exact 25 finite wave definitions. Future finite modes belong in `MODE_DEFINITIONS`.
 
 Persistent profile handling is isolated in [`src/game/meta.ts`](src/game/meta.ts). The in-game **DBG** panel (or **F1**) can toggle infinite cash, add cash, heal the core, clear the current wave, restore stock, max the selected tower, or permanently unlock every tower. Infinite cash makes deployments, upgrades, and relocations free without replacing the visible balance values in the config.

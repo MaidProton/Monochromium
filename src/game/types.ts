@@ -1,4 +1,5 @@
 export type Point = Readonly<{ x: number; y: number }>;
+export type PlayerId = string;
 
 export type TowerKind =
   | "bandit"
@@ -124,6 +125,7 @@ export interface TowerDefinition {
 
 export interface Tower {
   readonly id: number;
+  readonly ownerId: PlayerId;
   readonly kind: TowerKind;
   position: Point;
   onPath: boolean;
@@ -183,6 +185,7 @@ export interface Enemy {
   burnTimer: number;
   burnTickTimer: number;
   burnDamage: number;
+  burnOwnerId: PlayerId | null;
   burnSlowFactor: number;
   hitFlash: number;
   spawnScale: number;
@@ -194,6 +197,7 @@ export interface Projectile {
   position: { x: number; y: number };
   delay: number;
   readonly targetId: number;
+  readonly ownerId: PlayerId;
   readonly damage: number;
   readonly kind: TowerKind;
   readonly speed: number;
@@ -262,6 +266,8 @@ export interface ModeDefinition {
   readonly description: string;
   readonly startingCash: number;
   readonly coreIntegrity: number;
+  /** Multiplayer hit cash earned per point of damage, relative to solo hit cash. */
+  readonly multiplayerHitCashMultiplier: number;
   readonly reward: {
     readonly coins: number;
     readonly tokens: number;
