@@ -13,8 +13,6 @@ export type MapEdge = "left" | "right" | "top" | "bottom";
 export interface CustomMapDraft {
   version: 1;
   id: CustomMapKind;
-  /** Existing maps predate publication and are promoted during sanitization. */
-  official: boolean;
   name: string;
   description: string;
   difficulty: "Easy" | "Medium" | "Hard";
@@ -94,7 +92,6 @@ export const createBlockedZone = (x = 680, y = 270): BlockedZone => ({
 export const createCustomMap = (): CustomMapDraft => ({
   version: 1,
   id: createId(),
-  official: false,
   name: "Untitled Map",
   description: "A custom sandbox battlefield.",
   difficulty: "Medium",
@@ -204,9 +201,8 @@ const sanitizeMap = (value: unknown): CustomMapDraft | null => {
   const draft: CustomMapDraft = {
     version: 1,
     id: typeof source.id === "string" && source.id.startsWith("custom-map:") ? source.id as CustomMapKind : createId(),
-    // Maps created before publication support had no flag; promote those maps
-    // on load so the existing library becomes an official map roster.
-    official: source.official !== false,
+    // Ignore the legacy `official` field. Official content is packaged in
+    // MAP_DEFINITIONS; creator data can never grant profile rewards.
     name: safeText(source.name, "Untitled Map", 48),
     description: safeText(source.description, "A custom sandbox battlefield.", 220),
     difficulty: source.difficulty === "Easy" || source.difficulty === "Medium" || source.difficulty === "Hard" ? source.difficulty : "Medium",
@@ -238,7 +234,12 @@ export const sanitizeCustomMaps = (value: unknown): CustomMapDraft[] => {
 export const loadCustomMaps = (): CustomMapDraft[] => {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? sanitizeCustomMaps(JSON.parse(raw)) : [];
+    if (!raw) return [];
+    const maps = sanitizeCustomMaps(JSON.parse(raw));
+    // Normalize records written by the old publication experiment so they do
+    // not retain an `official` flag in browser storage.
+    if (JSON.stringify(maps) !== raw) cacheCustomMapsLocally(maps);
+    return maps;
   } catch {
     return [];
   }
@@ -281,12 +282,10 @@ export const customMapToDefinition = (draft: CustomMapDraft): MapDefinition => {
     kind: draft.id,
     name: draft.name,
     index: 0,
-    isCustom: !draft.official,
+    isCustom: true,
     difficulty: draft.difficulty,
     description: draft.description,
-    rewardMultiplier: draft.official
-      ? draft.difficulty === "Hard" ? 1.3 : draft.difficulty === "Medium" ? 1.15 : 1
-      : 1,
+    rewardMultiplier: 1,
     mapScale: numberInRange(draft.mapScale, DEFAULT_MAP_SCALE, MAP_SCALE_MIN, MAP_SCALE_MAX),
     path: draft.path.map((point) => ({ ...point })),
     core,

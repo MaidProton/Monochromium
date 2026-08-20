@@ -4,7 +4,9 @@ const remoteReleasesUrl = configuredUpdateValue(updateConfig.remoteReleasesUrl, 
 
 export default {
   packagerConfig: {
-    asar: true,
+    // Utility processes need a real on-disk entry point in packaged builds.
+    // Electron transparently resolves the app.asar path to this unpacked copy.
+    asar: { unpack: "dist-server/**" },
     name: "Monochromium",
     executableName: "Monochromium",
     prune: true,
@@ -21,6 +23,8 @@ export default {
       /^\/tsconfig(?:\..+)?\.json$/,
       /^\/tsconfig\.tsbuildinfo$/,
       /^\/vite\.config\.ts$/,
+      /^\/vite\.server\.config\.ts$/,
+      /^\/electron\/smoke-server\.mjs$/,
     ],
   },
   rebuildConfig: {},

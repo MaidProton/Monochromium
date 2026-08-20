@@ -13,10 +13,11 @@ export interface DiskSaveResult {
   readonly data: SaveBundle | null;
 }
 
-const apiPort = new URLSearchParams(window.location.search).get("saveApi");
-const desktopApi = window.monochromiumDesktop;
+const browserWindow = typeof window === "undefined" ? null : window;
+const apiPort = browserWindow ? new URLSearchParams(browserWindow.location.search).get("saveApi") : null;
+const desktopApi = browserWindow?.monochromiumDesktop;
 const apiBase = apiPort && /^\d{1,5}$/.test(apiPort)
-  ? `http://${window.location.hostname}:${apiPort}/api/save`
+  ? `http://${browserWindow?.location.hostname ?? "127.0.0.1"}:${apiPort}/api/save`
   : null;
 
 const request = async (path = "", init?: RequestInit): Promise<Response | null> => {

@@ -1,29 +1,35 @@
 {
   "name": "monochromium",
   "private": true,
-  "version": "1.0.13",
+  "version": "1.0.17",
   "description": "A pathbound counter-defense game.",
   "author": "Monochromium",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.server.config.ts",
+    "test": "vitest run",
+    "test:server": "electron electron/smoke-server.mjs",
     "preview": "vite preview --host 127.0.0.1",
-    "desktop:dev": "node electron/dev.mjs",
+    "desktop:dev": "vite build --config vite.server.config.ts && node electron/dev.mjs",
     "desktop:package": "npm run build && electron-forge package",
     "desktop:make": "npm run build && electron-forge make",
-    "desktop:release:patch": "npm version patch --no-git-tag-version && npm run desktop:make"
+    "desktop:release:patch": "npm version patch --no-git-tag-version && npm run desktop:make",
+    "desktop:release:github": "powershell -NoProfile -ExecutionPolicy Bypass -File ./release-update.ps1"
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",
-    "tone": "^15.1.22"
+    "tone": "^15.1.22",
+    "trystero": "^0.25.3",
+    "werift": "^0.24.4"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
     "@electron-forge/maker-squirrel": "^7.11.2",
     "electron": "^43.2.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1"
+    "vite": "^8.2.1",
+    "vitest": "^4.1.11"
   }
 }

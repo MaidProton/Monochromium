@@ -49,23 +49,25 @@ For a public GitHub repository, publish the Squirrel artifacts to GitHub Release
 https://update.electronjs.org/OWNER/REPOSITORY/win32-x64/{version}
 ```
 
-Electron's hosted update service requires a public GitHub repository and non-draft, non-prerelease GitHub Releases. The release must include `Monochromium-Setup.exe`, the versioned `monochromium-<version>-full.nupkg`, and `RELEASES`.
+Electron's hosted update service requires a public GitHub repository and non-draft, non-prerelease GitHub Releases. The release must include only these updater assets: `Monochromium-Setup.exe`, the versioned `monochromium-<version>-full.nupkg`, and `RELEASES`. The included workflow keeps the release private as a draft while the assets upload, then publishes it after the upload completes. GitHub automatically exposes source-code archive links for public tags; those generated links cannot be removed, but the workflow does not attach a second source archive as a release asset.
 
 To generate delta packages, set `remoteReleasesUrl` to a URL for the existing Squirrel release directory containing `RELEASES` and the previous `.nupkg` files. You can also provide it during a build with `MONOCHROMIUM_REMOTE_RELEASES_URL`. Keep delta generation enabled; the full package remains available for new installations, while existing players can receive a much smaller delta package.
 
 The updater downloads in the background and never touches the save location at `%APPDATA%/Monochromium/monochromium_save.json`. When the download finishes, the player can restart from the main menu to apply it.
 
-The repository also includes `.github/workflows/release.yml`. After this project is pushed to GitHub, create a version tag such as `v1.0.1` and push it; GitHub Actions will build the Windows installer and publish the Squirrel artifacts as a GitHub Release. Add a `repository` entry to `package.json` pointing at that GitHub repository, and replace `OWNER/REPOSITORY` in `electron/update-config.mjs` before shipping the first updater-enabled build.
+The repository also includes `.github/workflows/release.yml`. After this project is pushed to GitHub, create a version tag such as `v1.0.1` and push it; GitHub Actions will build the Windows installer and publish only the Squirrel updater artifacts as a GitHub Release. Add a `repository` entry to `package.json` pointing at that GitHub repository, and replace `OWNER/REPOSITORY` in `electron/update-config.mjs` before shipping the first updater-enabled build.
 
 Before distributing a newer release, either update `version` in `package.json` or use:
 
 ```powershell
-npm run desktop:release:patch
+npm run desktop:release:github
 ```
 
-That command advances `1.0.0` to `1.0.1` (and so on) before rebuilding the installer. Version bumps let Squirrel recognize the installer as an upgrade while leaving the AppData save untouched.
+That command advances only the patch value (`1.0.0` to `1.0.1`), rebuilds the installer, and publishes only `Monochromium-Setup.exe`, the matching full `.nupkg`, and `RELEASES`. It does not commit, push, or attach source files. Version bumps let Squirrel recognize the installer as an upgrade while leaving the AppData save untouched. Run it from an elevated PowerShell if `gh auth status` requires the elevated GitHub credential store.
 
-On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the same version-and-installer workflow, keeps the console open if something fails, and prints the completed installer path when it succeeds.
+On Windows, `BUILD_DESKTOP_UPDATE.bat` is the local-only installer builder. It does not publish a GitHub release.
+
+To publish the GitHub update directly from Windows, double-click `RELEASE_DESKTOP_UPDATE.bat` or run `release-update.ps1`. The helper checks the manifest/package match, reuses an existing release when present, and uploads exactly the three updater assets without publishing the source tree.
 
 ## Controls
 
@@ -79,8 +81,9 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 - The Enemy List can export one custom enemy or a selected bulk bundle as JSON, and import those bundles later. The Mode List exports one custom mode per JSON file and can import it on another installation.
 - Imported modes preserve their custom-enemy references. A mode that references an unavailable custom enemy is visibly locked and cannot start until that enemy is imported; deleting an enemy leaves dependent modes locked instead of silently replacing the enemy.
 - The Creator Hub groups the Mode, Enemy, and Map creators behind one main-menu entry.
-- The Map Creator provides a live 1600×700 route editor with draggable edge terminals, route points, palette presets, rectangular no-build zones, undo/redo, validation, and rewardless unsaved playtests. Existing saved maps are promoted into the official map roster automatically; new maps remain sandboxed until published. Maps export and import one map per JSON file.
-- Published maps can be used with official modes and award profile Coins, Tokens, victories, run totals, and map clears using their difficulty-based reward multiplier. Unsaved playtests and unpublished maps remain rewardless.
+- The Map Creator provides a live 1600×700 route editor with draggable edge terminals, route points, palette presets, rectangular no-build zones, undo/redo, validation, and rewardless unsaved playtests. Maps created or imported through the creator always remain local custom maps and appear only in the Created Maps list.
+- Official maps are packaged in the built-in map roster, are read-only in the library, are available to every installation of the release, and can award profile Coins, Tokens, victories, run totals, and map clears using their difficulty-based reward multiplier. Custom maps and unsaved playtests remain rewardless.
+- To approve a creator map for everyone, its definition must be added to `MAP_DEFINITIONS` and shipped in a release; there is no in-game publish button that can turn local data into global content.
 - Creator waves are block-based. Enemy Group blocks choose an enemy, amount, spawn delay, and time until the next block starts; each group's spawning continues asynchronously when later blocks begin.
 - The Enemy Creator separates read-only official enemies from editable local enemies. A custom enemy can use a 3-12 sided polygon, any color/name, custom HP, shield HP, speed, tower damage, attack timing, telegraph timing, core damage, body radius, Hidden status, and an optional boss healthbar.
 - Shield HP is a separate yellow damage buffer. Damage removes shield first, excess damage is discarded instead of bleeding into HP, and shield damage does not award hitcash.
@@ -108,24 +111,26 @@ On Windows, you can instead double-click `BUILD_DESKTOP_UPDATE.bat`. It runs the
 - Infernus uses a reusable cone-spray particle system whose rotating square particles transition from yellow to red; future frost, poison, or breath attacks can reuse it with different colors.
 - Waves start automatically after a 3-second intermission. **1–9/0** select unlocked constructs, **Tab** toggles the persistent battle log, **P** pauses, **F1** opens debug tools, and **Esc** cancels placement.
 
-## Peer-to-peer multiplayer
+## Server-authoritative peer-to-peer multiplayer
 
-Multiplayer is two-player cooperative defense over browser-native WebRTC DataChannels. There is no dedicated gameplay server or account service: one player is the host and runs the authoritative enemy, damage, economy, and wave simulation. The guest sends requested actions and renders sequenced host snapshots; stale snapshots are discarded and enemy motion is interpolated between updates.
+Multiplayer is two-player cooperative defense in the Electron desktop app. Hosting starts a hidden Electron utility process that runs the authoritative 30 Hz enemy, damage, economy, tower, and wave simulation. Both visible game windows are presentation clients: they send validated command envelopes, interpolate 10 Hz replicated state, and generate particles, audio, screen shake, and other cosmetic effects locally. Browser and `launch_game.py` builds retain solo play and creators but intentionally do not expose multiplayer.
+
+The host renderer relays compact binary field-mask deltas between the local simulation process and the guest over WebRTC. Routine frames carry changed gameplay fields and entity lifecycle records; particles, gameplay projectile arrays, delayed visual effects, and the server spawn queue are never sent to the guest. Sequence gaps request a fresh keyframe, commands are idempotent by ID, and semantic events remain journaled until the guest acknowledges them. The multiplayer screen reports simulation tick rate, RTT, frame age, bandwidth, and state-send queue health.
 
 To connect:
 
-1. Both players open **MULTIPLAYER // P2P**, choose a username and color, and keep the game open.
-2. The host creates an offer and sends the complete code to the guest through any trusted chat.
-3. The guest pastes that offer, creates an answer, and sends the complete answer back.
-4. The host pastes and applies the answer. Once both sides show **CONNECTED**, the host chooses the mode and map.
+1. Both players open the Electron desktop app, choose **MULTIPLAYER // P2P**, and set a username and color.
+2. The host clicks **CREATE NEW ROOM**, then sends the displayed 8-character code through any trusted chat.
+3. The guest enters that code in the single **ROOM CODE** box and clicks **JOIN ROOM**.
+4. The host sees **CONNECTED** when the guest arrives and can choose the mode and map.
 
-Pairing uses non-trickle ICE, so each copied code already contains the gathered connection candidates. The default configuration uses public Google STUN endpoints for NAT discovery. STUN is a network service but does not carry gameplay data. No TURN relay is configured; connections can fail when either player is behind restrictive or symmetric NAT. A literally service-free setup is therefore limited to peers whose local/LAN candidates can reach each other. Pairing codes can contain network-candidate information and should only be shared with the intended player.
+Room discovery uses [Trystero](https://github.com/dmotz/trystero)'s public Nostr signaling strategy, so the room code is only a rendezvous key; remote commands and replication still travel directly peer-to-peer over encrypted WebRTC data channels. If a connection fails with **TURN REQUIRED**, open **NETWORK SETTINGS // TURN RELAY**, enter credentials from a TURN provider such as a self-hosted coturn server, Metered Open Relay, or Cloudflare Realtime, and save them on both devices. TURN credentials stay in local storage and are never included in room codes.
 
 Each player starts with the mode's full normal cash, has their own tower stock and wallet, owns only the towers they deploy, and receives the full wave-clear reward. Damage hit cash is credited to the owning damage source using the mode's multiplayer hit-cash percentage, including projectiles, splash, burns, bombs, delayed attacks, lightning, counters, and abilities. The default is 75%, meaning each point of actual damage accumulates $0.75 hit cash. A colored owner ring and label mark teammate towers; they can be inspected but not moved, sold, targeted, upgraded, countered, or activated by the other player.
 
-Both players can request pause and speed changes; the host applies requests in reliable arrival order. Map/mode choice, debug commands, and permanent session ending are host-only. Host custom maps, modes, and required custom enemies are sent as in-memory session content and do not alter the guest's saved creator library.
+Both players can request pause and speed changes; the authoritative process applies accepted requests in reliable arrival order. Map/mode choice, debug commands, and permanent session ending are host-only. Host custom maps, modes, and required custom enemies are sent as in-memory session content and do not alter the guest's saved creator library.
 
-If the guest disconnects, the host battle continues and the guest's wallet and towers remain active. Open **LNK** during the run and repeat the offer/answer exchange to reconnect the same guest identity and restore control. The host can deliver a completed run result after that reconnection as long as the host has not ended the session. Once the host ends it, the guest slot is permanently closed. With no profile server, a guest who is still disconnected when the host ends the session cannot receive or apply that result.
+If the guest disconnects, the hidden authoritative simulation continues and the guest's wallet and towers remain active. The guest can enter the same room code again to reconnect the reserved identity, receive a fresh keyframe, and restore control. There is no host migration: ending the host app or losing its simulation process ends the match without granting an unverified result.
 
 Official content grants each connected player the normal local profile reward from the host's final result. Custom and sandbox restrictions are unchanged. Result IDs are remembered locally to prevent the same reconnect result from being claimed twice; as with any serverless peer-hosted game, there is no central anti-cheat authority beyond trusting the host.
 
@@ -137,7 +142,7 @@ All editable gameplay definitions are grouped in [`src/game/config.ts`](src/game
 - `ECONOMY_RULES` contains solo hitcash, wave stipend, relocation cost, and casualty-refund tuning. Each `ModeDefinition` contains its own multiplayer hit-cash multiplier.
 - `COMBAT_RULES` contains the shared counter window and successful-counter cooldown.
 - `TOWER_DEFINITIONS` contains every tower's price, copy limit, forms, level stats, counter signature, active ability, and upgrade costs/skills.
-- `MAP_DEFINITIONS` contains the built-in official maps. Custom-map validation, publication-aware conversion, and persistence live in `src/game/customMaps.ts`, while shared battlefield/editor drawing lives in `src/game/mapRendering.ts`.
+- `MAP_DEFINITIONS` contains the built-in official maps. Custom-map validation, sandbox conversion, and persistence live in `src/game/customMaps.ts`, while shared battlefield/editor drawing lives in `src/game/mapRendering.ts`.
 - `NORMAL_MODE` contains starting resources, rewards, and the exact 25 finite wave definitions. Future finite modes belong in `MODE_DEFINITIONS`.
 
 Persistent profile handling is isolated in [`src/game/meta.ts`](src/game/meta.ts). The in-game **DBG** panel (or **F1**) can toggle infinite cash, add cash, heal the core, clear the current wave, restore stock, max the selected tower, or permanently unlock every tower. Infinite cash makes deployments, upgrades, and relocations free without replacing the visible balance values in the config.

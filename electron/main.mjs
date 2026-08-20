@@ -1,9 +1,10 @@
-import { app, autoUpdater, BrowserWindow, ipcMain, shell } from "electron";
+import { app, autoUpdater, BrowserWindow, ipcMain, shell, utilityProcess } from "electron";
 import electronSquirrelStartup from "electron-squirrel-startup";
 import { copyFile, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { configuredUpdateValue, updateConfig } from "./update-config.mjs";
+import { HostNetwork } from "./host-network.mjs";
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(moduleDirectory, "..");
@@ -24,6 +25,10 @@ const updateState = {
   message: "Automatic updates are not configured.",
 };
 let mainWindow = null;
+let hostServerProcess = null;
+let hostServerStopping = false;
+let hostNetwork = null;
+const hostCommandOwners = new Map();
 let updaterReady = false;
 let updateCheckPromise = null;
 let updateDownloadPromise = null;
@@ -31,6 +36,132 @@ let updateDownloadPromise = null;
 const publishUpdateState = (nextState) => {
   Object.assign(updateState, nextState);
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("updater:state", { ...updateState });
+};
+
+const publishRendererMessage = (channel, message) => {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, message);
+};
+
+const publishHostServerMessage = (message) => {
+  if (!message || typeof message !== "object") return;
+  if (message.type === "state" && message.frame instanceof ArrayBuffer) {
+    let sent = false;
+    if (hostNetwork?.connected) {
+      sent = hostNetwork.sendBinary(message.frame.slice(0));
+      if (!sent) {
+        try { hostServerProcess?.postMessage({ type: "keyframe-request" }); } catch { /* The server may be stopping. */ }
+      }
+    }
+    publishRendererMessage("host-server:message", { ...message, sent });
+    return;
+  }
+  if (message.type === "command-result") {
+    const owner = hostCommandOwners.get(message.result?.commandId) ?? "host";
+    hostCommandOwners.delete(message.result?.commandId);
+    if (owner === "guest") {
+      hostNetwork?.sendControl({ type: "command-result", result: message.result });
+      return;
+    }
+  }
+  if (message.type === "diagnostics" || message.type === "ready") {
+    const diagnostics = message.diagnostics;
+    if (diagnostics && hostNetwork?.connected) hostNetwork.sendControl({ type: "server-diagnostics", diagnostics });
+  }
+  publishRendererMessage("host-server:message", message);
+};
+
+const publishHostNetworkMessage = (message) => publishRendererMessage("host-network:message", message);
+
+const postHostServer = (message) => {
+  if (!hostServerProcess) return false;
+  try {
+    hostServerProcess.postMessage(message);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const createHostNetwork = () => hostNetwork ??= new HostNetwork({
+  onStatus: (message) => publishHostNetworkMessage(message),
+  onControl: (message, peerId) => {
+    if (message.type === "command") {
+      const submitted = postHostServer({ type: "command", envelope: message.envelope });
+      if (submitted) hostCommandOwners.set(message.envelope.commandId, "guest");
+      else hostNetwork?.sendControl({
+        type: "command-result",
+        result: {
+          commandId: message.envelope.commandId,
+          accepted: false,
+          serverTick: 0,
+          rejectionCode: "not-running",
+          message: "Authoritative server is not ready.",
+        },
+      });
+      return;
+    }
+    if (message.type === "resync-request") {
+      postHostServer({ type: "keyframe-request" });
+      return;
+    }
+    if (message.type === "event-ack") {
+      postHostServer({ type: "event-ack", eventId: message.eventId });
+      return;
+    }
+    publishHostNetworkMessage({ type: "control", message, peerId });
+  },
+  onRealtime: (message, peerId) => publishHostNetworkMessage({ type: "realtime", message, peerId }),
+  onPeerStatus: (connected) => postHostServer({ type: "peer-status", connected }),
+});
+
+const stopHostServer = (reason = "Host server stopped.") => {
+  const server = hostServerProcess;
+  if (!server) return;
+  hostServerStopping = true;
+  try { server.postMessage({ type: "stop", reason }); } catch { /* It may already have exited. */ }
+  setTimeout(() => {
+    if (hostServerProcess === server) server.kill();
+  }, 1_000).unref();
+};
+
+const startHostNetwork = async (config) => {
+  if (!config || typeof config.roomCode !== "string" || config.roomCode.length < 6 || config.roomCode.length > 8) {
+    throw new Error("Invalid host room configuration.");
+  }
+  await createHostNetwork().start(config.roomCode, config.iceServers);
+  return true;
+};
+
+const stopHostNetwork = (reason = "Host networking stopped.") => {
+  hostNetwork?.stop(reason);
+  hostCommandOwners.clear();
+};
+
+const startHostServer = (config) => {
+  if (!config || typeof config !== "object" || typeof config.sessionId !== "string" || !Array.isArray(config.players) || config.players.length !== 2) {
+    throw new Error("Invalid host simulation configuration.");
+  }
+  if (hostServerProcess) throw new Error("An authoritative simulation is already running.");
+  const serverPath = path.join(projectDirectory, "dist-server", "simulation-server.mjs");
+  hostServerStopping = false;
+  const server = utilityProcess.fork(serverPath, [], {
+    serviceName: "Monochromium Authoritative Simulation",
+    stdio: app.isPackaged ? "ignore" : "inherit",
+  });
+  hostServerProcess = server;
+  server.on("message", (message) => publishHostServerMessage(message));
+  server.once("exit", (code) => {
+    const expected = hostServerStopping;
+    if (hostServerProcess === server) hostServerProcess = null;
+    hostServerStopping = false;
+    if (!expected) {
+      stopHostNetwork("Authoritative simulation exited.");
+      publishHostServerMessage({ type: "fatal", message: `Authoritative simulation exited unexpectedly (code ${code}).` });
+    }
+  });
+  server.postMessage({ type: "start", config });
+  if (hostNetwork?.connected) server.postMessage({ type: "peer-status", connected: true });
+  return true;
 };
 
 const updateFeedUrl = () => updateFeedTemplate.replaceAll("{version}", app.getVersion());
@@ -299,6 +430,56 @@ ipcMain.handle("desktop:environment", () => ({
   savePath: savePaths().save,
 }));
 
+ipcMain.handle("host-server:start", (event, config) => {
+  if (event.sender !== mainWindow?.webContents) throw new Error("Untrusted host-server request.");
+  return startHostServer(config);
+});
+
+ipcMain.handle("host-network:start", async (event, config) => {
+  if (event.sender !== mainWindow?.webContents) throw new Error("Untrusted host-network request.");
+  return startHostNetwork(config);
+});
+
+ipcMain.handle("host-network:control", (event, message) => {
+  if (event.sender !== mainWindow?.webContents) return false;
+  return Boolean(hostNetwork?.sendControl(message));
+});
+
+ipcMain.handle("host-network:realtime", (event, message) => {
+  if (event.sender !== mainWindow?.webContents) return false;
+  return Boolean(hostNetwork?.sendRealtime(message));
+});
+
+ipcMain.handle("host-network:rtt", async (event) => {
+  if (event.sender !== mainWindow?.webContents) return null;
+  return await (hostNetwork?.measureRtt() ?? null);
+});
+
+ipcMain.handle("host-network:stop", (event, reason) => {
+  if (event.sender !== mainWindow?.webContents) return false;
+  stopHostNetwork(typeof reason === "string" ? reason.slice(0, 500) : "Host networking stopped.");
+  return true;
+});
+
+ipcMain.handle("host-server:command", (event, envelope) => {
+  if (event.sender !== mainWindow?.webContents || !hostServerProcess) return false;
+  if (envelope && typeof envelope.commandId === "string") hostCommandOwners.set(envelope.commandId, "host");
+  hostServerProcess.postMessage({ type: "command", envelope });
+  return true;
+});
+
+ipcMain.handle("host-server:keyframe", (event) => {
+  if (event.sender !== mainWindow?.webContents || !hostServerProcess) return false;
+  hostServerProcess.postMessage({ type: "keyframe-request" });
+  return true;
+});
+
+ipcMain.handle("host-server:stop", (event, reason) => {
+  if (event.sender !== mainWindow?.webContents) return false;
+  stopHostServer(typeof reason === "string" ? reason.slice(0, 500) : "Host ended the session.");
+  return true;
+});
+
 ipcMain.handle("balance:save-tower", async (_event, kind, definition) => {
   if (app.isPackaged) throw new Error("The Tower Balance Lab is available only in development builds.");
   if (typeof kind !== "string" || !/^[a-z]+$/.test(kind)) throw new Error("Invalid tower kind.");
@@ -379,5 +560,7 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
+  stopHostNetwork("Application closed.");
+  stopHostServer("Application closed.");
   if (process.platform !== "darwin") app.quit();
 });

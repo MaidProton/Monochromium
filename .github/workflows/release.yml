@@ -39,8 +39,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "out/make/squirrel.windows/x64"
-          $assets = @(Get-ChildItem -LiteralPath $releaseDir -File | Where-Object {
-            $_.Name -eq "RELEASES" -or $_.Extension -in @(".exe", ".nupkg")
-          } | ForEach-Object { $_.FullName })
-          if ($assets.Count -eq 0) { throw "No Squirrel release artifacts were produced." }
-          gh release create $env:GITHUB_REF_NAME @assets --title "Monochromium $env:GITHUB_REF_NAME" --generate-notes
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $assets = @(
+            (Join-Path $releaseDir "Monochromium-Setup.exe"),
+            (Join-Path $releaseDir "monochromium-$version-full.nupkg"),
+            (Join-Path $releaseDir "RELEASES")
+          )
+          foreach ($asset in $assets) {
+            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing required Squirrel release asset: $asset" }
+          }
+          $manifest = Get-Content -LiteralPath (Join-Path $releaseDir "RELEASES") -Raw
+          if ($manifest -notmatch [regex]::Escape("monochromium-$version-full.nupkg")) { throw "RELEASES does not reference the tagged full package." }
+          gh release create $env:GITHUB_REF_NAME @assets --draft --title "Monochromium $env:GITHUB_REF_NAME" --generate-notes
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest

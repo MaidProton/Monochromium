@@ -31,6 +31,7 @@ export const PATH: readonly Point[] = [
   { x: 1635, y: 500 },
 ] as const;
 
+/** Built-in official roster. Only maps packaged here are global and read-only. */
 export const MAP_DEFINITIONS: Record<OfficialMapKind, MapDefinition> = {
   sector07: {
     kind: "sector07",

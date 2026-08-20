@@ -362,17 +362,37 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
 .multiplayer-profile { z-index: 2; width: min(760px, 100%); margin: 0 auto; display: grid; grid-template-columns: minmax(0, 1fr) 130px; gap: 10px; }
 .multiplayer-profile label, .multiplayer-columns label { display: block; }
 .multiplayer-profile label > span, .multiplayer-columns label > span { display: block; margin-bottom: 6px; color: #89938e; font: 600 9px "DM Mono", monospace; letter-spacing: .1em; }
-.multiplayer-profile input, .multiplayer-columns textarea { width: 100%; border: 1px solid #414a47; border-radius: 0; outline: 0; background: #080c0d; color: #e4e8e3; font: 500 11px "DM Mono", monospace; }
+.multiplayer-profile input, .multiplayer-columns input, .multiplayer-columns textarea { width: 100%; border: 1px solid #414a47; border-radius: 0; outline: 0; background: #080c0d; color: #e4e8e3; font: 500 11px "DM Mono", monospace; }
+.multiplayer-network { z-index: 2; width: min(1120px, 100%); margin: 0 auto; border: 1px solid #3c4642; background: rgba(12,17,18,.86); }
+.multiplayer-network summary { min-height: 42px; padding: 0 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #cbd3ce; cursor: pointer; font: 700 9px "DM Mono", monospace; letter-spacing: .08em; list-style: none; }
+.multiplayer-network summary::-webkit-details-marker { display: none; }
+.multiplayer-network summary::after { content: "+"; color: var(--gold); font-size: 16px; }
+.multiplayer-network[open] summary::after { content: "−"; }
+.multiplayer-network summary b { color: #7f8984; font: 600 8px "DM Mono", monospace; }
+.multiplayer-network-fields { padding: 0 13px 12px; display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(160px, .8fr) minmax(160px, .8fr); gap: 10px; }
+.multiplayer-network-fields label { display: flex; flex-direction: column; gap: 6px; }
+.multiplayer-network-fields label > span { color: #89938e; font: 600 9px "DM Mono", monospace; letter-spacing: .1em; }
+.multiplayer-network-fields input, .multiplayer-network-fields textarea { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #414a47; border-radius: 0; outline: 0; resize: vertical; background: #080c0d; color: #e4e8e3; font: 500 10px "DM Mono", monospace; }
+.multiplayer-network-fields input:focus, .multiplayer-network-fields textarea:focus { border-color: var(--gold); }
+.multiplayer-network-fields small, .multiplayer-network-foot small { color: #737d78; font: 500 8px/1.45 "DM Mono", monospace; }
+.multiplayer-network-foot { padding: 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #303936; }
+.multiplayer-network-foot button { min-height: 32px; padding: 0 10px; font-size: 8px; }
 .multiplayer-profile input { min-height: 42px; padding: 8px 10px; }
 .multiplayer-profile input[type="color"] { padding: 4px; cursor: pointer; }
-.multiplayer-profile input:focus, .multiplayer-columns textarea:focus { border-color: var(--gold); }
+.multiplayer-profile input:focus, .multiplayer-columns input:focus, .multiplayer-columns textarea:focus { border-color: var(--gold); }
 .multiplayer-columns { z-index: 2; width: min(1120px, 100%); margin: 0 auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .multiplayer-columns section { padding: 18px; display: flex; flex-direction: column; gap: 10px; border: 1px solid #3c4642; background: rgba(12,17,18,.9); }
 .multiplayer-columns h3 { margin: 0; color: #e3e8e4; font: 700 20px "Manrope", sans-serif; }
 .multiplayer-columns p, .multiplayer-columns small { margin: 0; color: #8f9994; font: 500 10px/1.55 "DM Mono", monospace; }
 .multiplayer-step { color: var(--gold); font: 600 9px "DM Mono", monospace; letter-spacing: .14em; }
+.multiplayer-room-code { padding: 15px; display: grid; gap: 7px; border: 1px solid #59614b; background: rgba(241,208,122,.06); }
+.multiplayer-room-code span { color: #9eaa8c; font: 700 9px "DM Mono", monospace; letter-spacing: .16em; }
+.multiplayer-room-code strong { color: var(--gold); font: 700 clamp(27px, 4vw, 42px) "DM Mono", monospace; letter-spacing: .18em; line-height: 1; user-select: all; }
+.multiplayer-columns input { min-height: 46px; padding: 8px 11px; text-transform: uppercase; letter-spacing: .12em; }
 .multiplayer-columns textarea { min-height: 82px; padding: 9px; resize: vertical; word-break: break-all; }
 .multiplayer-columns button { align-self: flex-start; min-height: 39px; font-size: 9px; }
+.multiplayer-code-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.multiplayer-code-actions button { margin: 0; }
 .multiplayer-columns button:disabled, .primary-button:disabled, .secondary-button:disabled { opacity: .42; cursor: not-allowed; box-shadow: none; }
 .multiplayer-foot { z-index: 2; width: min(1120px, 100%); margin: 0 auto; padding: 9px 12px; display: flex; justify-content: space-between; gap: 12px; border: 1px solid #343d3a; color: #808a85; background: rgba(10,14,15,.82); font: 600 9px "DM Mono", monospace; letter-spacing: .08em; }
 .multiplayer-screen-actions { z-index: 2; align-self: center; display: flex; gap: 10px; }
@@ -1035,9 +1055,13 @@ button:focus-visible, a:focus-visible { outline: 2px solid var(--gold); outline-
   .menu-screen > p { font-size: 13px; }
   .multiplayer-heading { align-items: stretch; flex-direction: column; gap: 0; }
   .multiplayer-status { min-width: 0; margin-bottom: 12px; }
-  .multiplayer-profile, .multiplayer-columns { grid-template-columns: 1fr; }
+  .multiplayer-profile, .multiplayer-columns, .multiplayer-network-fields { grid-template-columns: 1fr; }
   .multiplayer-columns textarea { min-height: 72px; }
   .multiplayer-foot { align-items: flex-start; flex-direction: column; }
+  .multiplayer-network summary { align-items: flex-start; flex-direction: column; justify-content: center; gap: 4px; padding-block: 9px; }
+  .multiplayer-network summary::after { position: absolute; right: 13px; }
+  .multiplayer-network { position: relative; }
+  .multiplayer-network-foot { align-items: stretch; flex-direction: column; }
   .update-panel { align-items: stretch; flex-direction: column; }
   .update-actions { width: 100%; }
   .update-actions button { flex: 1; }
