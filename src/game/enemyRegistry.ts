@@ -10,10 +10,10 @@ export const setCustomEnemyRegistry = (drafts: readonly CustomEnemyDraft[]): voi
 };
 
 export const getEnemyDefinition = (kind: EnemyKind): EnemyDefinition =>
-  customDefinitions.get(kind) ?? officialDefinitions[kind as OfficialEnemyKind] ?? officialDefinitions.dummy;
+  customDefinitions.get(kind) ?? (Object.hasOwn(officialDefinitions, kind) ? officialDefinitions[kind as OfficialEnemyKind] : officialDefinitions.dummy);
 
 export const isKnownEnemyKind = (value: unknown): value is EnemyKind =>
-  typeof value === "string" && (value in officialDefinitions || customDefinitions.has(value as EnemyKind));
+  typeof value === "string" && (Object.hasOwn(officialDefinitions, value) || customDefinitions.has(value as EnemyKind));
 
 export const getOfficialEnemyDefinitions = (): readonly EnemyDefinition[] => Object.values(officialDefinitions);
 

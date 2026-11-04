@@ -13,31 +13,32 @@ export interface DiskSaveResult {
   readonly data: SaveBundle | null;
 }
 
-const browserWindow = typeof window === "undefined" ? null : window;
-const apiPort = browserWindow ? new URLSearchParams(browserWindow.location.search).get("saveApi") : null;
-const desktopApi = browserWindow?.monochromiumDesktop;
-const apiBase = apiPort && /^\d{1,5}$/.test(apiPort)
-  ? `http://${browserWindow?.location.hostname ?? "127.0.0.1"}:${apiPort}/api/save`
-  : null;
+const record = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 
-const request = async (path = "", init?: RequestInit): Promise<Response | null> => {
-  if (!apiBase) return null;
-  try {
-    return await fetch(`${apiBase}${path}`, {
-      ...init,
-      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    });
-  } catch {
-    return null;
-  }
+/** Normalizes imported save-shaped data before each section is sanitized. */
+export const sanitizeSaveBundle = (value: unknown): SaveBundle | null => {
+  const source = record(value);
+  if (!source || !Object.hasOwn(source, "meta") || !Array.isArray(source["customModes"])) return null;
+  return {
+    version: 1,
+    meta: source["meta"],
+    customModes: source["customModes"],
+    customEnemies: Array.isArray(source["customEnemies"]) ? source["customEnemies"] : [],
+    customMaps: Array.isArray(source["customMaps"]) ? source["customMaps"] : [],
+    creatorFolders: source["creatorFolders"] ?? {},
+  };
 };
 
-export const hasDiskSaveApi = (): boolean => desktopApi !== undefined || apiBase !== null;
+const desktopApi = typeof window === "undefined" ? undefined : window.monochromiumDesktop;
+
+export const hasDiskSaveApi = (): boolean => desktopApi !== undefined;
 
 export const getDesktopEnvironment = async (): Promise<{
   packaged: boolean;
   version: string;
   savePath: string;
+  gpu: MonochromiumGpuStatus;
 } | null> => {
   if (!desktopApi) return null;
   try {
@@ -55,15 +56,7 @@ export const loadDiskSave = async (): Promise<DiskSaveResult> => {
       return { available: false, exists: false, data: null };
     }
   }
-  const response = await request();
-  if (!response?.ok) return { available: false, exists: false, data: null };
-  try {
-    const payload = await response.json() as { exists?: unknown; data?: unknown };
-    const data = payload.data && typeof payload.data === "object" ? payload.data as SaveBundle : null;
-    return { available: true, exists: payload.exists === true, data };
-  } catch {
-    return { available: false, exists: false, data: null };
-  }
+  return { available: false, exists: false, data: null };
 };
 
 export const saveDiskSection = async (section: "meta" | "custom-modes" | "custom-enemies" | "custom-maps" | "creator-folders", value: unknown): Promise<boolean> => {
@@ -74,8 +67,7 @@ export const saveDiskSection = async (section: "meta" | "custom-modes" | "custom
       return false;
     }
   }
-  const response = await request(`/${section}`, { method: "PUT", body: JSON.stringify(value) });
-  return Boolean(response?.ok);
+  return false;
 };
 
 export const replaceDiskSave = async (bundle: SaveBundle): Promise<boolean> => {
@@ -86,6 +78,5 @@ export const replaceDiskSave = async (bundle: SaveBundle): Promise<boolean> => {
       return false;
     }
   }
-  const response = await request("", { method: "PUT", body: JSON.stringify(bundle) });
-  return Boolean(response?.ok);
+  return false;
 };

@@ -1,6 +1,5 @@
 import type { CustomEnemyDraft } from "./customEnemies.ts";
-import { TOWER_ORDER } from "./config.ts";
-import { joinRoom, type JsonValue, type MessageAction, type Room } from "trystero";
+import { TOWER_ORDER, TOWER_PERK_ORDER } from "./config.ts";
 import type {
   Enemy,
   MapDefinition,
@@ -12,86 +11,30 @@ import type {
   TargetingMode,
   Tower,
   TowerKind,
+  TowerPerkKind,
 } from "./types.ts";
 import type { CommandResult, SimulationCommandEnvelope, SimulationServerDiagnostics } from "./simulationProtocol.ts";
+import protocol from "../../shared/multiplayer-protocol.json";
+import packageJson from "../../package.json";
 
-export const MULTIPLAYER_PROTOCOL_VERSION = 5;
+// This is the binary/control wire schema version, not the game/content version.
+// Keep it stable for additive, backward-compatible messages and field additions.
+export const MULTIPLAYER_PROTOCOL_VERSION = protocol.protocolVersion;
+export const GAME_VERSION = packageJson.version;
 export const MULTIPLAYER_ROOM_CODE_LENGTH = 8;
 
-const MULTIPLAYER_ICE_SETTINGS_KEY = "monochromium.multiplayer-ice.v1";
-const MULTIPLAYER_APP_ID = "monochromium-coop-v2";
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-const MAX_CONTROL_BYTES = 2_000_000;
-const MAX_REALTIME_BYTES = 8_000_000;
-const MAX_CONTROL_MESSAGES_PER_SECOND = 60;
-const MAX_REALTIME_MESSAGES_PER_SECOND = 60;
-const DEFAULT_STUN_SERVERS = [
-  "stun:stun.l.google.com:19302",
-  "stun:stun1.l.google.com:19302",
+const LEGACY_MULTIPLAYER_NETWORK_KEYS = [
+  "monochromium.multiplayer-ice.v1",
+  "monochromium.multiplayer-connection.v1",
 ] as const;
 
-export interface MultiplayerIceSettings {
-  readonly turnUrls: string;
-  readonly turnUsername: string;
-  readonly turnCredential: string;
-}
-
-export const DEFAULT_MULTIPLAYER_ICE_SETTINGS: MultiplayerIceSettings = Object.freeze({
-  turnUrls: "",
-  turnUsername: "",
-  turnCredential: "",
-});
-
-const allowedIceUrl = (value: string): boolean => /^(stun|stuns|turn|turns):[^\s]+$/i.test(value);
-
-export const sanitizeMultiplayerIceSettings = (source: Partial<MultiplayerIceSettings> | null | undefined): MultiplayerIceSettings => {
-  const rawUrls = typeof source?.turnUrls === "string" ? source.turnUrls : "";
-  const turnUrls = rawUrls
-    .split(/[\s,]+/)
-    .map((value) => value.trim())
-    .filter((value, index, values) => value.length > 0 && allowedIceUrl(value) && values.indexOf(value) === index)
-    .slice(0, 8)
-    .join("\n");
-  return {
-    turnUrls,
-    turnUsername: typeof source?.turnUsername === "string" ? source.turnUsername.trim().slice(0, 256) : "",
-    turnCredential: typeof source?.turnCredential === "string" ? source.turnCredential.trim().slice(0, 512) : "",
-  };
-};
-
-export const loadMultiplayerIceSettings = (): MultiplayerIceSettings => {
+export const clearLegacyMultiplayerNetworkSettings = (): void => {
   try {
-    const stored = window.localStorage.getItem(MULTIPLAYER_ICE_SETTINGS_KEY);
-    return sanitizeMultiplayerIceSettings(stored ? JSON.parse(stored) as Partial<MultiplayerIceSettings> : null);
+    LEGACY_MULTIPLAYER_NETWORK_KEYS.forEach((key) => window.localStorage.removeItem(key));
   } catch {
-    return DEFAULT_MULTIPLAYER_ICE_SETTINGS;
+    // Legacy connection settings are ignored when local storage is unavailable.
   }
-};
-
-export const saveMultiplayerIceSettings = (source: Partial<MultiplayerIceSettings>): MultiplayerIceSettings => {
-  const sanitized = sanitizeMultiplayerIceSettings(source);
-  try {
-    window.localStorage.setItem(MULTIPLAYER_ICE_SETTINGS_KEY, JSON.stringify(sanitized));
-  } catch {
-    // The active pairing can still use the in-memory values if storage is unavailable.
-  }
-  return sanitized;
-};
-
-const configuredIceServers = (): RTCIceServer[] => {
-  const settings = loadMultiplayerIceSettings();
-  const iceServers: RTCIceServer[] = DEFAULT_STUN_SERVERS.map((urls) => ({ urls }));
-  const turnUrls = settings.turnUrls.split("\n").filter(Boolean);
-  if (turnUrls.length > 0 && settings.turnUsername && settings.turnCredential) {
-    iceServers.push({ urls: turnUrls, username: settings.turnUsername, credential: settings.turnCredential });
-  }
-  return iceServers;
-};
-
-export const hasConfiguredMultiplayerTurn = (): boolean => {
-  const settings = loadMultiplayerIceSettings();
-  return settings.turnUrls.length > 0 && settings.turnUsername.length > 0 && settings.turnCredential.length > 0;
 };
 
 export type MultiplayerRole = "host" | "guest";
@@ -111,6 +54,7 @@ export interface MultiplayerPlayer {
   readonly username: string;
   readonly color: string;
   readonly loadout: readonly TowerKind[];
+  readonly perkLoadout: readonly TowerPerkKind[];
 }
 
 export type MultiplayerCommand =
@@ -120,20 +64,31 @@ export type MultiplayerCommand =
   | { readonly type: "upgrade"; readonly towerId: number }
   | { readonly type: "target"; readonly towerId: number; readonly targeting: TargetingMode }
   | { readonly type: "counter"; readonly towerId: number }
-  | { readonly type: "ability"; readonly towerId: number }
+  | { readonly type: "auto-counter"; readonly towerId: number }
+  | { readonly type: "ability"; readonly towerId: number; readonly slot?: import("./types.ts").TowerAbilitySlot }
+  | { readonly type: "aim"; readonly towerId: number; readonly position: Point }
+  | { readonly type: "cancel-aim"; readonly towerId: number }
+  | { readonly type: "mecha-control"; readonly towerId: number; readonly active: boolean }
+  | { readonly type: "mecha-input"; readonly towerId: number; readonly moveX: -1 | 0 | 1; readonly moveY: -1 | 0 | 1; readonly aim: Point; readonly firing: boolean; readonly brake?: boolean }
   | { readonly type: "pause" }
-  | { readonly type: "speed" };
+  | { readonly type: "speed" }
+  | { readonly type: "skip-wave" };
 
 export interface MultiplayerSessionStart {
   readonly id: string;
+  /** Monotonically increasing round number within the persistent room. */
+  readonly round: number;
   readonly map: MapDefinition;
   readonly mode: ModeDefinition;
   readonly customEnemies: readonly CustomEnemyDraft[];
+  /** Host-authorized tower pool for this round. */
+  readonly allowedTowers: readonly TowerKind[];
   readonly players: readonly MultiplayerPlayer[];
 }
 
 export interface MultiplayerResult {
   readonly id: string;
+  readonly round: number;
   readonly victory: boolean;
   readonly wave: number;
   readonly coins: number;
@@ -141,6 +96,16 @@ export interface MultiplayerResult {
   readonly official: boolean;
   readonly mapKind: string;
   readonly modeKind: string;
+}
+
+export type MultiplayerLobbyPhase = "lobby" | "playing";
+
+export interface MultiplayerLobbyState {
+  readonly id: string;
+  readonly round: number;
+  readonly phase: MultiplayerLobbyPhase;
+  readonly session: MultiplayerSessionStart | null;
+  readonly guestReady: boolean;
 }
 
 export interface SerializedTower extends Omit<Tower, "engaged"> {
@@ -157,6 +122,7 @@ export interface SerializedTimedBomb {
   readonly sourceKind?: TowerKind;
   readonly proximity?: boolean;
   readonly towerLevel?: number;
+  readonly label?: string;
   readonly timer: number;
 }
 
@@ -187,38 +153,60 @@ export interface MultiplayerGameSnapshot {
   readonly projectiles: readonly Projectile[];
   readonly particles: readonly Particle[];
   readonly timedBombs: readonly SerializedTimedBomb[];
-  readonly spawnQueue: readonly { readonly kind: string; readonly spawnAt: number; readonly hp: number }[];
+  readonly spawnQueue: readonly { readonly kind: string; readonly spawnAt: number; readonly hp: number; readonly pathIndex?: number }[];
 }
 
 export type MultiplayerControlMessage =
-  | { readonly type: "hello"; readonly player: MultiplayerPlayer }
+  | { readonly type: "hello"; readonly player: MultiplayerPlayer; readonly gameVersion?: string }
+  | { readonly type: "lobby-state"; readonly state: MultiplayerLobbyState }
+  | { readonly type: "lobby-ready"; readonly round: number; readonly player: MultiplayerPlayer; readonly ready: boolean }
   | { readonly type: "session-start"; readonly session: MultiplayerSessionStart }
   | { readonly type: "command"; readonly envelope: SimulationCommandEnvelope }
   | { readonly type: "command-result"; readonly result: CommandResult }
   | { readonly type: "resync-request"; readonly lastSequence: number }
-  | { readonly type: "event-ack"; readonly eventId: number }
   | { readonly type: "server-diagnostics"; readonly diagnostics: SimulationServerDiagnostics }
   | { readonly type: "log"; readonly message: string; readonly tone?: "neutral" | "good" | "danger" }
+  | { readonly type: "chat"; readonly text: string; readonly senderId: string; readonly senderName: string; readonly senderColor: string; readonly sentAt: number }
   | { readonly type: "result"; readonly result: MultiplayerResult }
   | { readonly type: "end"; readonly reason: string }
   | { readonly type: "error"; readonly message: string };
 
-export type MultiplayerRealtimeMessage =
-  { readonly type: "cursor"; readonly point: Point | null };
-
-type WireMessage = MultiplayerControlMessage | MultiplayerRealtimeMessage;
-
-interface WireEnvelope {
-  readonly protocol: number;
-  readonly sessionId: string;
-  readonly message: WireMessage;
+export interface MultiplayerPilotInput {
+  /** Latest-wins pilot state. This intentionally bypasses reliable command acknowledgement. */
+  readonly type: "pilot-input";
+  readonly playerId: string;
+  readonly towerId: number;
+  readonly sequence: number;
+  readonly moveX: -1 | 0 | 1;
+  readonly moveY: -1 | 0 | 1;
+  readonly aim: Point;
+  readonly firing: boolean;
+  readonly brake?: boolean;
 }
+
+export interface MultiplayerPilotInputAck {
+  readonly playerId: string;
+  readonly towerId: number;
+  readonly sequence: number;
+}
+
+export type MultiplayerRealtimeMessage =
+  | { readonly type: "cursor"; readonly point: Point | null }
+  | MultiplayerPilotInput
+  | {
+      readonly type: "pulse";
+      readonly sequence: number;
+      readonly sentAt: number;
+      readonly point: Point | null;
+      readonly stateSequence: number;
+      readonly eventId: number;
+    };
 
 interface MultiplayerSessionCallbacks {
   readonly onStatus: (status: MultiplayerConnectionStatus, detail?: string) => void;
-  readonly onControl: (message: MultiplayerControlMessage, peerId: string) => void;
-  readonly onRealtime: (message: MultiplayerRealtimeMessage, peerId: string) => void;
-  readonly onBinary: (frame: ArrayBuffer, peerId: string) => void;
+  readonly onControl: (message: MultiplayerControlMessage, peerId: string, receivedAt?: number) => void;
+  readonly onRealtime: (message: MultiplayerRealtimeMessage, peerId: string, receivedAt?: number) => void;
+  readonly onBinary: (frame: ArrayBuffer, peerId: string, receivedAt?: number) => void;
 }
 
 interface JsonRecord {
@@ -226,6 +214,8 @@ interface JsonRecord {
   readonly x?: unknown;
   readonly y?: unknown;
   readonly player?: unknown;
+  readonly gameVersion?: unknown;
+  readonly state?: unknown;
   readonly session?: unknown;
   readonly command?: unknown;
   readonly envelope?: unknown;
@@ -236,10 +226,41 @@ interface JsonRecord {
   readonly reason?: unknown;
   readonly tone?: unknown;
   readonly result?: unknown;
+  readonly ready?: unknown;
+  readonly round?: unknown;
   readonly point?: unknown;
   readonly lastSequence?: unknown;
   readonly eventId?: unknown;
+  readonly stateSequence?: unknown;
+  readonly sentAt?: unknown;
+  readonly sequence?: unknown;
+  readonly towerId?: unknown;
+  readonly moveX?: unknown;
+  readonly moveY?: unknown;
+  readonly aim?: unknown;
+  readonly firing?: unknown;
+  readonly brake?: unknown;
+  readonly events?: unknown;
   readonly diagnostics?: unknown;
+  readonly id?: unknown;
+  readonly tick?: unknown;
+  readonly cosmeticSeed?: unknown;
+  readonly kind?: unknown;
+  readonly entityId?: unknown;
+  readonly targetId?: unknown;
+  readonly position?: unknown;
+  readonly from?: unknown;
+  readonly visual?: unknown;
+  readonly speed?: unknown;
+  readonly value?: unknown;
+  readonly count?: unknown;
+  readonly duration?: unknown;
+  readonly color?: unknown;
+  readonly label?: unknown;
+  readonly text?: unknown;
+  readonly senderId?: unknown;
+  readonly senderName?: unknown;
+  readonly senderColor?: unknown;
 }
 
 const isJsonRecord = (value: unknown): value is JsonRecord =>
@@ -261,7 +282,11 @@ const isControlMessage = (value: unknown): value is MultiplayerControlMessage =>
   if (!isJsonRecord(value) || typeof value.type !== "string") return false;
   switch (value.type) {
     case "hello":
-      return isJsonRecord(value.player);
+      return isJsonRecord(value.player) && (value.gameVersion === undefined || isBoundedString(value.gameVersion, 32));
+    case "lobby-state":
+      return isJsonRecord(value.state);
+    case "lobby-ready":
+      return Number.isSafeInteger(value.round) && isJsonRecord(value.player) && typeof value.ready === "boolean";
     case "session-start":
       return isJsonRecord(value.session);
     case "command":
@@ -273,12 +298,16 @@ const isControlMessage = (value: unknown): value is MultiplayerControlMessage =>
       return isJsonRecord(value.result);
     case "resync-request":
       return Number.isSafeInteger(value.lastSequence);
-    case "event-ack":
-      return Number.isSafeInteger(value.eventId);
     case "server-diagnostics":
       return isJsonRecord(value.diagnostics);
     case "log":
       return isBoundedString(value.message, 2_000) && (value.tone === undefined || value.tone === "neutral" || value.tone === "good" || value.tone === "danger");
+    case "chat":
+      return isBoundedString(value.text, 256) &&
+        isBoundedString(value.senderId, 64) &&
+        isBoundedString(value.senderName, 20) &&
+        typeof value.senderColor === "string" && value.senderColor.length <= 32 &&
+        Number.isFinite(value.sentAt);
     case "result":
       return isJsonRecord(value.result);
     case "end":
@@ -292,6 +321,12 @@ const isControlMessage = (value: unknown): value is MultiplayerControlMessage =>
 const isRealtimeMessage = (value: unknown): value is MultiplayerRealtimeMessage => {
   if (!isJsonRecord(value) || typeof value.type !== "string") return false;
   if (value.type === "cursor") return isPointMessage(value.point);
+  if (value.type === "pilot-input") return isBoundedString(value.playerId, 64) && Number.isSafeInteger(value.towerId) &&
+    Number.isSafeInteger(value.sequence) && [-1, 0, 1].includes(value.moveX as number) && [-1, 0, 1].includes(value.moveY as number) &&
+    isPointMessage(value.aim) && value.aim !== null && typeof value.firing === "boolean" &&
+    (value.brake === undefined || typeof value.brake === "boolean");
+  if (value.type === "pulse") return Number.isSafeInteger(value.sequence) && isFiniteJsonNumber(value.sentAt) &&
+    Number.isSafeInteger(value.stateSequence) && Number.isSafeInteger(value.eventId) && isPointMessage(value.point);
   return false;
 };
 
@@ -300,52 +335,27 @@ const randomId = (): string => {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 };
 
-const randomRoomCode = (): string => {
-  if (typeof crypto !== "undefined" && "getRandomValues" in crypto) {
-    const bytes = new Uint8Array(MULTIPLAYER_ROOM_CODE_LENGTH);
-    crypto.getRandomValues(bytes);
-    return Array.from(bytes, (byte) => ROOM_CODE_ALPHABET[byte % ROOM_CODE_ALPHABET.length] ?? "A").join("");
-  }
-  return Array.from({ length: MULTIPLAYER_ROOM_CODE_LENGTH }, () => ROOM_CODE_ALPHABET[Math.floor(Math.random() * ROOM_CODE_ALPHABET.length)] ?? "A").join("");
-};
-
-const normalizeRoomCode = (raw: string): string => raw.replace(/[\s-]/g, "").toUpperCase();
-
 export const isValidMultiplayerRoomCode = (raw: string): boolean => {
-  const code = normalizeRoomCode(raw);
-  return code.length >= 6 && code.length <= MULTIPLAYER_ROOM_CODE_LENGTH && [...code].every((character) => ROOM_CODE_ALPHABET.includes(character));
+  const code = raw.replace(/[\s-]/g, "").toUpperCase();
+  return code.length === MULTIPLAYER_ROOM_CODE_LENGTH && [...code].every((character) => ROOM_CODE_ALPHABET.includes(character));
 };
 
 const roomCodeOrThrow = (raw: string): string => {
-  const code = normalizeRoomCode(raw);
+  const code = raw.replace(/[\s-]/g, "").toUpperCase();
   if (!isValidMultiplayerRoomCode(code)) throw new Error(`Room codes are ${MULTIPLAYER_ROOM_CODE_LENGTH} letters/numbers. Check the code and try again.`);
   return code;
 };
 
-const roomConfig = (roomCode: string): Parameters<typeof joinRoom>[0] => ({
-  appId: MULTIPLAYER_APP_ID,
-  password: roomCode,
-  rtcConfig: { iceServers: configuredIceServers() },
-  trickleIce: true,
-});
-
 export class MultiplayerSession {
-  private room: Room | null = null;
-  private controlAction: MessageAction<JsonValue> | null = null;
-  private realtimeAction: MessageAction<JsonValue> | null = null;
-  private binaryAction: MessageAction<ArrayBuffer | ArrayBufferView> | null = null;
   private _role: MultiplayerRole | null = null;
   private _status: MultiplayerConnectionStatus = "idle";
   private _sessionId = "";
-  private intentionallyClosed = false;
   private remotePeerId = "";
-  private realtimeBusy = false;
   private binaryBusy = false;
-  private pendingPeerIds = new Set<string>();
-  private roomGeneration = 0;
-  private readonly receiveWindows = new Map<string, { controlStartedAt: number; controlCount: number; realtimeStartedAt: number; realtimeCount: number }>();
 
-  constructor(private readonly callbacks: MultiplayerSessionCallbacks) {}
+  constructor(private readonly callbacks: MultiplayerSessionCallbacks) {
+    clearLegacyMultiplayerNetworkSettings();
+  }
 
   get role(): MultiplayerRole | null { return this._role; }
   get status(): MultiplayerConnectionStatus { return this._status; }
@@ -354,241 +364,95 @@ export class MultiplayerSession {
   get stateSendBusy(): boolean { return this.binaryBusy; }
   isExpectedPeer(peerId: string): boolean { return Boolean(peerId) && peerId === this.remotePeerId; }
 
-  handleDesktopMessage(message: MonochromiumHostNetworkMessage): void {
-    if (this._role !== "host") return;
+  handleDesktopMessage(message: MonochromiumMultiplayerNetworkMessage): void {
+    if (message.type === "state-pressure") {
+      this.binaryBusy = message.busy;
+      return;
+    }
+    if (message.type === "rtt") return;
     if (message.type === "status") {
       if (message.peerId) this.remotePeerId = message.peerId;
-      if (message.status === "disconnected" || message.status === "closed" || message.status === "failed") this.remotePeerId = "";
+      if (message.status !== "connected") {
+        this.remotePeerId = "";
+        this.binaryBusy = false;
+      }
       this.setStatus(message.status, message.detail);
       return;
     }
     if (!message.peerId || !this.isExpectedPeer(message.peerId)) return;
-    if (message.type === "control") this.callbacks.onControl(message.message, message.peerId);
-    else this.callbacks.onRealtime(message.message, message.peerId);
+    if (message.type === "control" && isControlMessage(message.message)) this.callbacks.onControl(message.message, message.peerId, message.receivedAt);
+    else if (message.type === "realtime" && isRealtimeMessage(message.message)) this.callbacks.onRealtime(message.message, message.peerId, message.receivedAt);
+    else if (message.type === "binary" && message.frame instanceof ArrayBuffer) this.callbacks.onBinary(message.frame, message.peerId, message.receivedAt);
   }
 
   async measureRtt(): Promise<number | null> {
-    if (this._role === "host") return await (window.monochromiumDesktop?.measureHostNetworkRtt() ?? null);
-    if (!this.room || !this.remotePeerId) return null;
+    return await (window.monochromiumDesktop?.measureMultiplayerRtt() ?? null);
+  }
+
+  async createHostRoom(): Promise<string> {
+    const desktop = window.monochromiumDesktop;
+    if (!desktop) throw new Error("Multiplayer requires the Monochromium desktop app.");
+    this._role = "host";
+    this._sessionId = "";
+    this.remotePeerId = "";
+    this.binaryBusy = false;
+    this.setStatus("creating-room", "Contacting the secure multiplayer relay…");
     try {
-      return await this.room.ping(this.remotePeerId);
-    } catch {
-      return null;
+      const result = await desktop.startMultiplayerNetwork({ role: "host" });
+      this._sessionId = roomCodeOrThrow(result.roomCode);
+      return this._sessionId;
+    } catch (error) {
+      if (this._status !== "failed") this.setStatus("failed", error instanceof Error ? error.message : "Could not create the multiplayer room.");
+      throw error;
     }
   }
 
-  createHostRoom(roomCode = randomRoomCode()): string {
-    const code = roomCodeOrThrow(roomCode);
-    this.closeRoom();
-    this._role = "host";
-    this._sessionId = code;
-    this.intentionallyClosed = false;
-    this.setStatus("creating-room", "Creating a short room code…");
-    void window.monochromiumDesktop?.startHostNetwork({ roomCode: code, iceServers: configuredIceServers() }).catch((error) => {
-      if (this._role === "host" && this._sessionId === code) this.setStatus("failed", error instanceof Error ? error.message : "Could not start host networking.");
-    });
-    return code;
-  }
-
-  joinRoom(rawRoomCode: string): string {
+  async joinRoom(rawRoomCode: string): Promise<string> {
+    const desktop = window.monochromiumDesktop;
+    if (!desktop) throw new Error("Multiplayer requires the Monochromium desktop app.");
     const code = roomCodeOrThrow(rawRoomCode);
-    this.closeRoom();
     this._role = "guest";
     this._sessionId = code;
-    this.intentionallyClosed = false;
-    this.setStatus("joining-room", "Looking for the host room…");
-    this.openRoom(code);
-    return code;
+    this.remotePeerId = "";
+    this.binaryBusy = false;
+    this.setStatus("joining-room", "Contacting the secure multiplayer relay…");
+    try {
+      const result = await desktop.startMultiplayerNetwork({ role: "guest", roomCode: code });
+      this._sessionId = roomCodeOrThrow(result.roomCode);
+      return this._sessionId;
+    } catch (error) {
+      if (this._status !== "failed") this.setStatus("failed", error instanceof Error ? error.message : "Could not join the multiplayer room.");
+      throw error;
+    }
+  }
+
+  async retryConnection(): Promise<string> {
+    const result = await window.monochromiumDesktop?.retryMultiplayerNetwork();
+    if (!result) throw new Error("No multiplayer connection is available to retry.");
+    this._sessionId = roomCodeOrThrow(result.roomCode);
+    return this._sessionId;
   }
 
   sendControl(message: MultiplayerControlMessage): boolean {
-    if (this._role === "host") {
-      void window.monochromiumDesktop?.sendHostNetworkControl(message);
-      return Boolean(window.monochromiumDesktop && this.connected);
-    }
-    return this.sendAction(this.controlAction, message, MAX_CONTROL_BYTES);
+    if (!this.connected || !window.monochromiumDesktop) return false;
+    void window.monochromiumDesktop.sendMultiplayerControl(message);
+    return true;
   }
 
   sendRealtime(message: MultiplayerRealtimeMessage): boolean {
-    if (this._role === "host") {
-      void window.monochromiumDesktop?.sendHostNetworkRealtime(message);
-      return Boolean(window.monochromiumDesktop && this.connected);
-    }
-    if (this.realtimeBusy) return false;
-    this.realtimeBusy = true;
-    const sent = this.sendAction(this.realtimeAction, message, MAX_REALTIME_BYTES);
-    if (!sent) this.realtimeBusy = false;
-    return sent;
-  }
-
-  sendBinary(frame: ArrayBuffer): boolean {
-    if (this._role === "host") return false;
-    if (!this.binaryAction || !this.remotePeerId || this.binaryBusy || frame.byteLength > MAX_REALTIME_BYTES) return false;
-    this.binaryBusy = true;
-    const action = this.binaryAction;
-    void action.send(frame, { target: this.remotePeerId }).catch(() => {
-      if (!this.intentionallyClosed) this.setStatus("disconnected", "The peer connection dropped while sending state.");
-    }).finally(() => {
-      this.binaryBusy = false;
-    });
+    if (!this.connected || !window.monochromiumDesktop) return false;
+    void window.monochromiumDesktop.sendMultiplayerRealtime(message);
     return true;
   }
 
   close(reason = "Session closed."): void {
     if (this.connected) this.sendControl({ type: "end", reason });
-    this.intentionallyClosed = true;
-    this.closeRoom();
+    void window.monochromiumDesktop?.stopMultiplayerNetwork(reason);
     this._role = null;
     this._sessionId = "";
-    this.setStatus("closed", reason);
-  }
-
-  private openRoom(roomCode: string): void {
-    const generation = ++this.roomGeneration;
-    const room = joinRoom(roomConfig(roomCode), roomCode, {
-      onJoinError: (details) => {
-        if (generation !== this.roomGeneration) return;
-        const detail = hasConfiguredMultiplayerTurn()
-          ? `Room connection failed even with TURN configured: ${details.error}`
-          : `Room connection failed: ${details.error}. If this repeats, configure TURN in Network Settings.`;
-        this.setStatus("failed", detail);
-      },
-      onPeerHandshake: async (peerId) => {
-        if (generation !== this.roomGeneration) throw new Error("Stale multiplayer room.");
-        if ((this.remotePeerId && this.remotePeerId !== peerId) || (this.pendingPeerIds.size > 0 && !this.pendingPeerIds.has(peerId))) {
-          throw new Error("This room already has a player.");
-        }
-        this.pendingPeerIds.add(peerId);
-        try {
-          if (this.remotePeerId && this.remotePeerId !== peerId) throw new Error("This room already has a player.");
-        } finally {
-          this.pendingPeerIds.delete(peerId);
-        }
-      },
-    });
-    this.room = room;
-    this.controlAction = room.makeAction<JsonValue>("monochromium-control");
-    this.realtimeAction = room.makeAction<JsonValue>("monochromium-realtime");
-    this.binaryAction = room.makeAction<ArrayBuffer | ArrayBufferView>("monochromium-state-v5");
-    this.controlAction.onMessage = (data, context) => {
-      if (generation === this.roomGeneration) this.receiveAction(data, "control", context.peerId);
-    };
-    this.realtimeAction.onMessage = (data, context) => {
-      if (generation === this.roomGeneration) this.receiveAction(data, "realtime", context.peerId);
-    };
-    this.binaryAction.onMessage = (data, context) => {
-      if (generation !== this.roomGeneration || !this.isExpectedPeer(context.peerId)) return;
-      // Trystero documents ArrayBuffer delivery, although some Chromium/WebRTC
-      // paths hand back a typed view. Normalize both forms before the frame
-      // reaches the decoder; otherwise a valid keyframe is silently discarded.
-      const frame = data instanceof ArrayBuffer
-        ? data
-        : ArrayBuffer.isView(data)
-          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength).slice().buffer
-          : null;
-      if (!frame || frame.byteLength > MAX_REALTIME_BYTES) return;
-      this.callbacks.onBinary(frame, context.peerId);
-    };
-    room.onPeerJoin = (peerId) => {
-      if (generation !== this.roomGeneration) return;
-      if (this.remotePeerId && this.remotePeerId !== peerId) {
-        void this.controlAction?.send({ type: "error", message: "This room already has a player." }, { target: peerId });
-        return;
-      }
-      this.remotePeerId = peerId;
-      this.setStatus("connected", "Friend joined the room. You are connected peer-to-peer.");
-    };
-    room.onPeerLeave = (peerId) => {
-      if (generation !== this.roomGeneration) return;
-      this.receiveWindows.delete(peerId);
-      if (peerId !== this.remotePeerId || this.intentionallyClosed) return;
-      this.remotePeerId = "";
-      this.setStatus("disconnected", "Friend disconnected. Rejoin with the same room code to reconnect.");
-    };
-  }
-
-  private receiveAction(raw: JsonValue, kind: "control" | "realtime", peerId: string): void {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
-    if (!this.isExpectedPeer(peerId)) return;
-    let encodedBytes = 0;
-    try {
-      encodedBytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
-    } catch {
-      return;
-    }
-    const maximum = kind === "control" ? MAX_CONTROL_BYTES : MAX_REALTIME_BYTES;
-    if (encodedBytes > maximum) return;
-    const envelope = raw as Partial<WireEnvelope>;
-    if (envelope.protocol !== MULTIPLAYER_PROTOCOL_VERSION) {
-      this.setStatus("failed", `Incompatible multiplayer protocol. Both players must run protocol ${MULTIPLAYER_PROTOCOL_VERSION}.`);
-      return;
-    }
-    if (envelope.sessionId !== this._sessionId || !envelope.message) return;
-    if (!this.acceptIncoming(peerId, kind)) return;
-    if (kind === "control") {
-      if (isControlMessage(envelope.message)) this.callbacks.onControl(envelope.message, peerId);
-    } else if (isRealtimeMessage(envelope.message)) this.callbacks.onRealtime(envelope.message, peerId);
-  }
-
-  private acceptIncoming(peerId: string, kind: "control" | "realtime"): boolean {
-    const now = performance.now();
-    const window = this.receiveWindows.get(peerId) ?? {
-      controlStartedAt: now,
-      controlCount: 0,
-      realtimeStartedAt: now,
-      realtimeCount: 0,
-    };
-    if (kind === "control") {
-      if (now - window.controlStartedAt >= 1_000) {
-        window.controlStartedAt = now;
-        window.controlCount = 0;
-      }
-      if (window.controlCount >= MAX_CONTROL_MESSAGES_PER_SECOND) return false;
-      window.controlCount += 1;
-    } else {
-      if (now - window.realtimeStartedAt >= 1_000) {
-        window.realtimeStartedAt = now;
-        window.realtimeCount = 0;
-      }
-      if (window.realtimeCount >= MAX_REALTIME_MESSAGES_PER_SECOND) return false;
-      window.realtimeCount += 1;
-    }
-    this.receiveWindows.set(peerId, window);
-    return true;
-  }
-
-  private sendAction(action: MessageAction<JsonValue> | null, message: WireMessage, maxBytes: number): boolean {
-    if (!action || !this.remotePeerId) return false;
-    const wire = { protocol: MULTIPLAYER_PROTOCOL_VERSION, sessionId: this._sessionId, message } satisfies WireEnvelope;
-    let encodedBytes = 0;
-    try {
-      encodedBytes = new TextEncoder().encode(JSON.stringify(wire)).byteLength;
-    } catch {
-      return false;
-    }
-    if (encodedBytes > maxBytes) return false;
-    const target = this.remotePeerId;
-    void action.send(wire as unknown as JsonValue, { target }).catch(() => {
-      if (!this.intentionallyClosed) this.setStatus("disconnected", "The peer connection dropped while sending data.");
-    }).finally(() => {
-      if (action === this.realtimeAction) this.realtimeBusy = false;
-    });
-    return true;
-  }
-
-  private closeRoom(): void {
-    if (this._role === "host") void window.monochromiumDesktop?.stopHostNetwork("Host room closed.");
-    this.roomGeneration += 1;
-    void this.room?.leave();
-    this.room = null;
-    this.controlAction = null;
-    this.realtimeAction = null;
-    this.binaryAction = null;
     this.remotePeerId = "";
-    this.realtimeBusy = false;
     this.binaryBusy = false;
-    this.pendingPeerIds.clear();
-    this.receiveWindows.clear();
+    this.setStatus("closed", reason);
   }
 
   private setStatus(status: MultiplayerConnectionStatus, detail?: string): void {
@@ -596,6 +460,7 @@ export class MultiplayerSession {
     this.callbacks.onStatus(status, detail);
   }
 }
+
 
 export const sanitizeMultiplayerPlayer = (
   player: Partial<MultiplayerPlayer>,
@@ -610,10 +475,14 @@ export const sanitizeMultiplayerPlayer = (
   const loadout = Array.isArray(player.loadout)
     ? player.loadout.filter((kind): kind is TowerKind => typeof kind === "string" && TOWER_ORDER.includes(kind as TowerKind)).slice(0, 5)
     : [];
+  const perkLoadout = Array.isArray(player.perkLoadout)
+    ? [...new Set(player.perkLoadout.filter((kind): kind is TowerPerkKind => typeof kind === "string" && TOWER_PERK_ORDER.includes(kind as TowerPerkKind)))].slice(0, 3)
+    : [];
   return {
     id: typeof player.id === "string" && /^[a-z0-9-]{4,64}$/i.test(player.id) ? player.id : fallbackId,
     username,
     color,
     loadout,
+    perkLoadout,
   };
 };

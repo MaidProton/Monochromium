@@ -30,8 +30,34 @@ jobs:
         shell: pwsh
         run: npm version "$(($env:GITHUB_REF_NAME).TrimStart('v'))" --no-git-tag-version --allow-same-version
 
+      - name: Run release checks in parallel
+        run: npm run release:checks
+
+      - name: Configure delta source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = [version]$env:GITHUB_REF_NAME.TrimStart('v')
+          if ($version.Build -gt 0) {
+            $previousVersion = "{0}.{1}.{2}" -f $version.Major, $version.Minor, ($version.Build - 1)
+            $previousTag = "v$previousVersion"
+            gh release view $previousTag --repo $env:GITHUB_REPOSITORY *> $null
+            if ($LASTEXITCODE -eq 0) {
+              "MONOCHROMIUM_REMOTE_RELEASES_URL=https://github.com/$env:GITHUB_REPOSITORY/releases/download/$previousTag/" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              Write-Host "Delta source: https://github.com/$env:GITHUB_REPOSITORY/releases/download/$previousTag/"
+            } else {
+              Write-Host "No previous release found; building a full package only."
+            }
+          } else {
+            Write-Host "No previous patch release exists; building a full package only."
+          }
+
       - name: Build Squirrel.Windows installer
-        run: npm run desktop:make
+        run: npm run desktop:make:fast
+
+      - name: Smoke test authoritative server
+        run: npm run test:server
 
       - name: Publish GitHub Release
         shell: pwsh
@@ -45,10 +71,16 @@ jobs:
             (Join-Path $releaseDir "monochromium-$version-full.nupkg"),
             (Join-Path $releaseDir "RELEASES")
           )
+          $deltaAsset = Join-Path $releaseDir "monochromium-$version-delta.nupkg"
+          if (Test-Path -LiteralPath $deltaAsset -PathType Leaf) {
+            $assets += $deltaAsset
+          }
           foreach ($asset in $assets) {
             if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing required Squirrel release asset: $asset" }
           }
           $manifest = Get-Content -LiteralPath (Join-Path $releaseDir "RELEASES") -Raw
           if ($manifest -notmatch [regex]::Escape("monochromium-$version-full.nupkg")) { throw "RELEASES does not reference the tagged full package." }
+          if ($env:MONOCHROMIUM_REMOTE_RELEASES_URL -and -not (Test-Path -LiteralPath $deltaAsset -PathType Leaf)) { throw "A delta source was configured, but Squirrel did not produce the tagged delta package." }
+          if ((Test-Path -LiteralPath $deltaAsset -PathType Leaf) -and ($manifest -notmatch [regex]::Escape("monochromium-$version-delta.nupkg"))) { throw "RELEASES does not reference the tagged delta package." }
           gh release create $env:GITHUB_REF_NAME @assets --draft --title "Monochromium $env:GITHUB_REF_NAME" --generate-notes
           gh release edit $env:GITHUB_REF_NAME --draft=false --latest

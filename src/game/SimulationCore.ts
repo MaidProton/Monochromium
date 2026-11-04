@@ -1,7 +1,8 @@
 import { Game } from "./Game.ts";
+import { TOWER_ORDER } from "./config.ts";
 import { sanitizeCustomEnemies } from "./customEnemies.ts";
 import { setCustomEnemyRegistry } from "./enemyRegistry.ts";
-import { MULTIPLAYER_PROTOCOL_VERSION } from "./multiplayer.ts";
+import { MULTIPLAYER_PROTOCOL_VERSION, type MultiplayerPilotInput, type MultiplayerPilotInputAck } from "./multiplayer.ts";
 import {
   SIMULATION_TICK_HZ,
   type AuthoritativeStateFrame,
@@ -15,19 +16,30 @@ export interface SimulationCoreCallbacks {
   readonly onResult: (victory: boolean, wave: number) => void;
 }
 
+export interface SimulationCoreOptions {
+  /** Defaults to the fixed simulation clock so replays do not depend on wall time. */
+  readonly now?: () => number;
+}
+
 /** DOM-free authoritative facade used by the Electron utility process. */
 export class SimulationCore {
   private readonly game: Game;
   private readonly handledCommands = new Map<string, boolean>();
   private readonly events: SimulationEvent[] = [];
+  private readonly now: () => number;
   private eventSequence = 0;
   private snapshotSequence = 0;
   private _tick = 0;
+  private readonly pilotInputAcks = new Map<string, MultiplayerPilotInputAck>();
 
-  constructor(config: SimulationSessionConfig, callbacks: SimulationCoreCallbacks) {
-    if (config.protocol !== MULTIPLAYER_PROTOCOL_VERSION || config.players.length !== 2) throw new Error("Invalid or incompatible simulation session.");
-    const host = config.players[0];
+  constructor(config: SimulationSessionConfig, callbacks: SimulationCoreCallbacks, options: SimulationCoreOptions = {}) {
+    if (config.protocol !== MULTIPLAYER_PROTOCOL_VERSION || config.players.length !== 2 || !Array.isArray(config.allowedTowers) || config.allowedTowers.length === 0) throw new Error("Invalid or incompatible simulation session.");
+    const allowedTowers = new Set(config.allowedTowers.filter((kind) => TOWER_ORDER.includes(kind)));
+    if (allowedTowers.size === 0) throw new Error("The simulation session has no authorized tower types.");
+    const players = config.players.map((player) => ({ ...player, loadout: player.loadout.filter((kind) => allowedTowers.has(kind)) }));
+    const host = players[0];
     if (!host) throw new Error("The simulation session does not contain a host.");
+    this.now = options.now ?? (() => this._tick * 1_000 / SIMULATION_TICK_HZ);
     setCustomEnemyRegistry(sanitizeCustomEnemies(config.customEnemies));
     this.game = new Game(null as unknown as HTMLCanvasElement, {
       onUi: () => undefined,
@@ -35,9 +47,9 @@ export class SimulationCore {
       onGameOver: (wave) => callbacks.onResult(false, wave),
       onVictory: (mode) => callbacks.onResult(true, mode.waves.length),
       onSimulationEvent: (event) => this.emitEvent(event),
-    }, null, { headless: true });
+    }, null, { headless: true, now: this.now });
     this.game.setSimulationSeed(config.seed);
-    this.game.configureMultiplayer("host", host, config.players);
+    this.game.configureMultiplayer("host", host, players);
     this.game.startRun(config.map, host.loadout, config.mode);
   }
 
@@ -49,7 +61,8 @@ export class SimulationCore {
   }
 
   submit(envelope: SimulationCommandEnvelope): CommandResult {
-    const prior = this.handledCommands.get(envelope.commandId);
+    const commandKey = `${envelope.playerId}:${envelope.commandId}`;
+    const prior = this.handledCommands.get(commandKey);
     if (prior !== undefined) {
       return {
         commandId: envelope.commandId,
@@ -59,7 +72,7 @@ export class SimulationCore {
       };
     }
     const accepted = this.game.applyMultiplayerCommand(envelope.playerId, envelope.command);
-    this.handledCommands.set(envelope.commandId, accepted);
+    this.handledCommands.set(commandKey, accepted);
     if (this.handledCommands.size > 2_048) this.handledCommands.delete(this.handledCommands.keys().next().value as string);
     return {
       commandId: envelope.commandId,
@@ -69,12 +82,37 @@ export class SimulationCore {
     };
   }
 
+  /** Applies only the latest continuous pilot state; it is not a reliable gameplay command. */
+  submitPilotInput(input: MultiplayerPilotInput): boolean {
+    const key = `${input.playerId}:${input.towerId}`;
+    const prior = this.pilotInputAcks.get(key);
+    if (prior && input.sequence <= prior.sequence) return false;
+    const accepted = this.game.applyMultiplayerCommand(input.playerId, {
+      type: "mecha-input",
+      towerId: input.towerId,
+      moveX: input.moveX,
+      moveY: input.moveY,
+      aim: input.aim,
+      firing: input.firing,
+      ...(input.brake === undefined ? {} : { brake: input.brake }),
+    });
+    if (accepted) {
+      this.pilotInputAcks.set(key, { playerId: input.playerId, towerId: input.towerId, sequence: input.sequence });
+      if (this.pilotInputAcks.size > 100) this.pilotInputAcks.delete(this.pilotInputAcks.keys().next().value as string);
+    }
+    return accepted;
+  }
+
+  getPilotInputAcks(): readonly MultiplayerPilotInputAck[] {
+    return [...this.pilotInputAcks.values()];
+  }
+
   createFrame(): AuthoritativeStateFrame | null {
     const snapshot = this.game.createMultiplayerSnapshot(++this.snapshotSequence);
     if (!snapshot) return null;
     return {
       tick: this._tick,
-      generatedAt: performance.now(),
+      generatedAt: this.now(),
       snapshot: { ...snapshot, projectiles: [], particles: [], spawnQueue: [] },
       events: this.events.splice(0),
     };

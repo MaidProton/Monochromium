@@ -2,8 +2,11 @@ node_modules/
 dist/
 dist-server/
 out/
+.wrangler/
+.wrangler-logs/
 *.log
 __pycache__/
 save_data/
 .DS_Store
 .monochromium-dev.pid
+.smoke-artifacts/

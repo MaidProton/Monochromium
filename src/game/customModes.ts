@@ -11,6 +11,7 @@ export interface CustomEnemyGroupBlockDraft {
   count: number;
   spawnDelay: number;
   nextBlockDelay: number;
+  spawnPathIndex?: number;
 }
 
 export interface CustomWaveDraft {
@@ -87,6 +88,9 @@ const sanitizeBlock = (value: unknown): CustomEnemyGroupBlockDraft => {
     count: integerInRange(source.count, 1, 1, 10000),
     spawnDelay: numberInRange(source.spawnDelay, 1, 0.02, 3600),
     nextBlockDelay: numberInRange(source.nextBlockDelay, 1, 0, 3600),
+    ...(typeof source.spawnPathIndex === "number" && Number.isFinite(source.spawnPathIndex) && source.spawnPathIndex >= 0
+      ? { spawnPathIndex: integerInRange(source.spawnPathIndex, 0, 0, 999) }
+      : {}),
   };
 };
 

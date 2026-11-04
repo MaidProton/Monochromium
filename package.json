@@ -1,7 +1,7 @@
 {
   "name": "monochromium",
   "private": true,
-  "version": "1.0.17",
+  "version": "1.0.58",
   "description": "A pathbound counter-defense game.",
   "author": "Monochromium",
   "type": "module",
@@ -9,27 +9,42 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build && vite build --config vite.server.config.ts",
-    "test": "vitest run",
-    "test:server": "electron electron/smoke-server.mjs",
-    "preview": "vite preview --host 127.0.0.1",
+    "build:bundle": "vite build && vite build --config vite.server.config.ts",
+    "typecheck": "tsc --noEmit --pretty false",
+    "test": "vitest run --exclude relay/**",
+    "test:all": "npm test && npm run test:relay",
+    "release:checks": "node scripts/run-release-checks.mjs",
+    "release:checks:app": "node scripts/run-release-checks.mjs --app-only",
+    "verify": "npm run typecheck && npm run test:all && npm run build && npm run test:server && npm run test:ui",
+    "test:relay": "set \"WRANGLER_LOG_PATH=%CD%\\.wrangler-logs\\wrangler.log\" && vitest run --config relay/vitest.config.ts",
+    "test:ui": "node electron/smoke-ui.mjs",
+    "relay:dev": "wrangler dev --config relay/wrangler.jsonc",
+    "relay:deploy": "wrangler deploy --config relay/wrangler.jsonc && npm run relay:check",
+    "relay:check": "node scripts/check-relay-protocol.mjs",
+    "relay:smoke": "node relay/smoke.mjs",
+    "test:server": "electron --disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --no-sandbox electron/smoke-server.mjs",
+    "replay": "node scripts/run-replay.mjs",
     "desktop:dev": "vite build --config vite.server.config.ts && node electron/dev.mjs",
     "desktop:package": "npm run build && electron-forge package",
     "desktop:make": "npm run build && electron-forge make",
-    "desktop:release:patch": "npm version patch --no-git-tag-version && npm run desktop:make",
+    "desktop:make:fast": "npm run build:bundle && electron-forge make",
+    "desktop:release:patch": "npm version patch --no-git-tag-version && npm run typecheck && npm run desktop:make:fast",
     "desktop:release:github": "powershell -NoProfile -ExecutionPolicy Bypass -File ./release-update.ps1"
   },
   "dependencies": {
-    "electron-squirrel-startup": "^1.0.1",
-    "tone": "^15.1.22",
-    "trystero": "^0.25.3",
-    "werift": "^0.24.4"
+    "electron-squirrel-startup": "^1.0.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.0.0",
+    "@cloudflare/workers-types": "^5.20260822.1",
     "@electron-forge/cli": "^7.11.2",
     "@electron-forge/maker-squirrel": "^7.11.2",
-    "electron": "^43.2.0",
+    "electron": "^43.8.7",
+    "resedit": "^2.0.3",
+    "tone": "^15.1.22",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "wrangler": "^4.125.0"
   }
 }

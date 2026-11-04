@@ -1,0 +1,158 @@
+@keyframes overlayFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.settings-screen, .game-menu-overlay, .confirm-overlay {
+  position: absolute;
+  inset: 0;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 6, 7, .76);
+  backdrop-filter: blur(14px);
+}
+.settings-screen:not([hidden]), .game-menu-overlay:not([hidden]), .confirm-overlay:not([hidden]), .graphics-setup-overlay:not([hidden]) {
+  animation: overlayFadeIn .18s ease-out both;
+}
+.game-menu-overlay { z-index: 80; }
+.settings-screen { z-index: 100; }
+.confirm-overlay { z-index: 110; }
+.graphics-setup-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 140;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+  background: rgba(4, 6, 7, .96);
+}
+.graphics-setup-overlay[hidden] { display: none; }
+.graphics-setup-card {
+  width: min(780px, 100%);
+  padding: 34px;
+  border: 1px solid #69736d;
+  border-radius: 14px;
+  background: var(--card-surface);
+  box-shadow: 0 24px 70px rgba(0,0,0,.62);
+  text-align: center;
+  zoom: var(--ui-scale);
+  animation: cardScaleIn .22s var(--ease-out-expo) both;
+}
+.graphics-setup-card h2 { margin: 12px 0 9px; color: var(--warm-text); font-size: 36px; letter-spacing: -.035em; }
+.graphics-setup-card > p:not(.graphics-setup-status) { max-width: 590px; margin: 0 auto; color: var(--warm-muted); font-size: 12px; line-height: 1.55; }
+.graphics-setup-status { min-height: 32px; margin: 18px auto 14px; color: var(--warm-accent); font: 600 10px/1.45 "Cascadia Mono", Consolas, monospace; }
+.graphics-preset-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; text-align: left; }
+.graphics-preset-option {
+  min-height: 128px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid var(--warm-line);
+  border-radius: var(--control-radius);
+  background: var(--card-surface);
+  color: #e3e8e3;
+  cursor: pointer;
+  text-align: left;
+  box-shadow: inset 0 1px rgba(255,255,255,.02);
+  transition: transform .16s var(--ease-out-expo), border-color .16s ease, background-color .16s ease, box-shadow .16s ease;
+}
+.graphics-preset-option:hover, .graphics-preset-option:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--warm-accent-bright);
+  background: var(--card-surface-hover);
+  box-shadow: var(--card-hover-shadow);
+  outline: 0;
+}
+.graphics-preset-option.recommended {
+  border-color: var(--warm-accent);
+  box-shadow: inset 0 0 0 1px rgba(226,189,112,.3), 0 8px 22px rgba(226,189,112,.12);
+}
+.graphics-preset-option strong { color: var(--warm-accent-bright); font: 700 11px "Cascadia Mono", Consolas, monospace; letter-spacing: .08em; }
+.graphics-preset-option small { color: var(--warm-muted); font-size: 10px; line-height: 1.45; }
+.settings-card {
+  width: min(1120px, 100%);
+  max-height: min(820px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #59645e;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #161c1c, #0d1112 62%);
+  box-shadow: var(--panel-shadow);
+  zoom: var(--ui-scale);
+  animation: cardScaleIn .22s var(--ease-out-expo) both;
+}
+.settings-head { min-height: 70px; padding: 0 18px 0 22px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--warm-line); background: linear-gradient(90deg, rgba(226,189,112,.1), transparent 50%); }
+.settings-head span, .settings-head small { display: block; }
+.settings-head span { color: var(--warm-accent-bright); font: 700 15px "Cascadia Mono", Consolas, monospace; letter-spacing: .09em; }
+.settings-head small { margin-top: 5px; color: var(--warm-muted); font: 600 9px "Cascadia Mono", Consolas, monospace; }
+.settings-head button { width: 38px; height: 38px; border: 1px solid var(--warm-line-strong); background: #171d1e; color: #d4dad5; cursor: pointer; font-size: 22px; }
+.settings-body { min-height: 0; padding: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 12px; overflow-y: auto; }
+.settings-section { padding: 15px; border: 1px solid #333e39; border-radius: 9px; background: rgba(12, 17, 18, .82); }
+.settings-section > header { margin-bottom: 9px; padding-bottom: 10px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; border-bottom: 1px solid #2e3734; }
+.settings-section > header span { color: var(--warm-accent-bright); font: 700 10px "Cascadia Mono", Consolas, monospace; letter-spacing: .1em; }
+.settings-section > header small { color: var(--warm-faint); font: 600 8px "Cascadia Mono", Consolas, monospace; }
+.setting-row { min-height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) 170px; align-items: center; gap: 14px; border-bottom: 1px solid rgba(52,63,58,.55); }
+.setting-row:last-child { border-bottom: 0; }
+.setting-row span strong, .setting-row span small { display: block; }
+.setting-row span strong { color: #e3e7e2; font-size: 12px; }
+.setting-row span small { margin-top: 3px; color: var(--warm-muted); font-size: 9px; line-height: 1.4; }
+.setting-row select { min-height: 36px; padding: 0 9px; color: #dce1dc; }
+.graphics-status { display: block; padding-top: 9px; color: var(--warm-faint); font: 600 8px "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; }
+.graphics-status.good { color: #9ed398; }
+.graphics-status.danger { color: #f28a84; }
+.setting-slider { min-height: 58px; display: grid; gap: 8px; padding: 9px 0; border-bottom: 1px solid rgba(52,63,58,.55); }
+.setting-slider:last-child { border-bottom: 0; }
+.setting-slider > span { display: flex; justify-content: space-between; color: #e3e7e2; font-size: 12px; }
+.setting-slider output { color: var(--warm-accent); font: 650 10px "Cascadia Mono", Consolas, monospace; }
+.graphics-toggle-row { min-height: 50px; padding: 8px 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 10px; align-items: center; border-bottom: 1px solid rgba(52,63,58,.55); cursor: pointer; }
+.graphics-toggle-row:last-of-type { border-bottom: 0; }
+.graphics-toggle-row input { width: 16px; height: 16px; margin: 0; accent-color: var(--warm-accent); }
+.graphics-toggle-row strong, .graphics-toggle-row small { display: block; }
+.graphics-toggle-row strong { color: #e3e7e2; font-size: 11px; }
+.graphics-toggle-row small { margin-top: 3px; color: var(--warm-muted); font-size: 9px; line-height: 1.35; }
+.graphics-toggle-row > b { color: var(--warm-faint); font: 600 9px "Cascadia Mono", Consolas, monospace; }
+.graphics-toggle-row > b.active { color: var(--warm-accent); }
+.audio-section .audio-enabled-row { margin: 0; border-radius: 7px; }
+.audio-section .audio-slider-list { padding: 9px 0 0; }
+.controls-reference { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.controls-reference > div { min-height: 54px; padding: 7px; display: grid; grid-template-columns: 90px minmax(0,1fr); align-items: center; gap: 8px; border: 1px solid #303a36; border-radius: 7px; background: #101516; }
+.controls-reference kbd { color: var(--warm-accent-bright); font-size: 9px; }
+.controls-reference strong, .controls-reference small { display: block; }
+.controls-reference strong { color: #dce1dc; font-size: 10px; }
+.controls-reference small { margin-top: 2px; color: var(--warm-faint); font-size: 8px; line-height: 1.3; }
+.system-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+.system-actions button { min-height: 36px; padding-inline: 11px; font-size: 9px; }
+.system-section .save-notice { display: block; margin: 10px 0 0; }
+.system-section .update-panel { position: static; width: 100%; margin: 10px 0 0; }
+.settings-foot { min-height: 68px; padding: 10px 16px 10px 20px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--warm-line); }
+.settings-foot > span { color: var(--warm-muted); font-size: 10px; }
+.settings-foot > div { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.settings-foot button { min-height: 38px; padding-inline: 12px; font-size: 9px; }
+
+.game-menu-card, .confirm-card {
+  width: min(480px, 100%);
+  padding: 28px;
+  border: 1px solid #626c67;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #192020, #0d1112 68%);
+  box-shadow: var(--panel-shadow);
+  text-align: center;
+  zoom: var(--ui-scale);
+}
+.overlay-kicker { color: var(--warm-accent); font-size: 10px; letter-spacing: .14em; }
+.overlay-kicker.danger { color: var(--warm-danger); }
+.game-menu-card h2, .confirm-card h2 { margin: 11px 0 8px; color: var(--warm-text); font-size: 34px; letter-spacing: -.035em; }
+.game-menu-card > p, .confirm-card > p { margin: 0; color: var(--warm-muted); font-size: 12px; line-height: 1.55; }
+.game-menu-summary { margin: 20px 0 12px; padding: 10px 12px; display: flex; justify-content: space-between; gap: 12px; border: 1px solid #35403b; border-radius: 7px; background: #0d1213; color: var(--warm-muted); font: 650 9px "Cascadia Mono", Consolas, monospace; }
+.game-menu-summary strong { color: var(--warm-accent-bright); }
+.game-menu-actions { display: grid; gap: 8px; }
+.game-menu-actions button { width: 100%; min-height: 48px; }
+.game-menu-actions button kbd { margin-left: auto; padding: 3px 7px; border: 1px solid rgba(0,0,0,.25); border-radius: 4px; font-size: 9px; }
+.confirm-card { width: min(430px, 100%); }
+.confirm-actions { margin-top: 22px; display: flex; justify-content: flex-end; gap: 8px; }
+.confirm-actions button { min-width: 130px; }

@@ -1,0 +1,63 @@
+:root {
+  --ui-scale: 1;
+  --scanline-opacity: .3;
+  --warm-bg: #090b0c;
+  --warm-surface: #121718;
+  --warm-surface-raised: #192021;
+  --warm-surface-soft: rgba(22, 29, 29, .88);
+  --warm-line: #37413e;
+  --warm-line-strong: #56625d;
+  --warm-text: #f0f1eb;
+  --warm-muted: #9ba49f;
+  --warm-faint: #6e7773;
+  --warm-accent: #e2bd70;
+  --warm-accent-bright: #f2d48e;
+  --warm-danger: #ee7c70;
+  --warm-success: #9acb92;
+  --panel-radius: 10px;
+  --control-radius: 7px;
+  --panel-shadow: 0 24px 70px rgba(0, 0, 0, .42);
+  --card-surface: linear-gradient(135deg, rgba(24, 31, 31, .92), rgba(14, 19, 20, .95));
+  --card-surface-hover: linear-gradient(135deg, #202827, #151b1c);
+  --card-border-hover: #7b704f;
+  --card-hover-shadow: 0 14px 34px rgba(0, 0, 0, .32);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-smooth: cubic-bezier(0.25, 0.8, 0.25, 1);
+  color: var(--warm-text);
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  background:
+    radial-gradient(circle at 22% 0%, rgba(226, 189, 112, .08), transparent 34rem),
+    radial-gradient(circle at 88% 100%, rgba(95, 123, 113, .07), transparent 38rem),
+    var(--warm-bg);
+}
+
+button, input, select, textarea { font-family: inherit; }
+code, kbd, .onboarding-kicker, .stat-label, .stage-topline, .console-head, .log-entries, .overlay-kicker {
+  font-family: "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+}
+
+html[data-interface-blur="false"] * {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+html[data-interface-animations="false"] *,
+html[data-interface-animations="false"] *::before,
+html[data-interface-animations="false"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+}
+html[data-reduced-motion="true"] *,
+html[data-reduced-motion="true"] *::before,
+html[data-reduced-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+}
+
+html[data-reduced-motion="true"] .scanline::after { display: none; }
+.scanline { opacity: var(--scanline-opacity); }
